@@ -8,6 +8,12 @@ Cold data lifecycle tooling for operational databases.
 
 coldctl is currently under active development.
 
+## Workspace layout
+
+- `crates/coldctl` contains the command-line application.
+- `crates/coldctl-core` contains archive orchestration and core domain types.
+- `crates/coldctl-cloud` contains the SaaS/control-plane client.
+
 ## Usage
 
 ```bash

@@ -1,14 +1,19 @@
-[package]
-name = "coldctl"
+[workspace]
+members = [
+    "crates/coldctl",
+    "crates/coldctl-core",
+    "crates/coldctl-cloud",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "CLI for analyzing, archiving, and querying cold database data"
 license = "Apache-2.0"
 repository = "https://github.com/coldctl/coldctl"
 homepage = "https://www.coldctl.com"
-readme = "README.md"
-keywords = ["database", "archive", "postgresql", "parquet", "cli"]
-categories = ["command-line-utilities", "database"]
 
-[dependencies]
+[workspace.dependencies]
+coldctl-core = { path = "crates/coldctl-core" }
+coldctl-cloud = { path = "crates/coldctl-cloud" }
 clap = { version = "4", features = ["derive"] }

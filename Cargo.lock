@@ -97,7 +97,17 @@ name = "coldctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "coldctl-cloud",
+ "coldctl-core",
 ]
+
+[[package]]
+name = "coldctl-cloud"
+version = "0.1.0"
+
+[[package]]
+name = "coldctl-core"
+version = "0.1.0"
 
 [[package]]
 name = "colorchoice"

@@ -1,0 +1,16 @@
+[package]
+name = "coldctl"
+description = "CLI for analyzing, archiving, and querying cold database data"
+readme = "../../README.md"
+keywords = ["database", "archive", "postgresql", "parquet", "cli"]
+categories = ["command-line-utilities", "database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+clap.workspace = true
+coldctl-core.workspace = true
+coldctl-cloud.workspace = true

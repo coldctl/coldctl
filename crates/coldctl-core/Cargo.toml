@@ -1,0 +1,10 @@
+[package]
+name = "coldctl-core"
+description = "Core domain and archive orchestration for coldctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
