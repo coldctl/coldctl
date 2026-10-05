@@ -1,1 +1,37 @@
 /target
+__pycache__/
+
+# Local credentials and secret-manager exports. Commit only synthetic examples.
+.env
+.env.*
+!.env.example
+!.env.sample
+.cargo/credentials
+.cargo/credentials.toml
+credentials.local.*
+/secrets/
+id_rsa
+id_ed25519
+*.private.pem
+*.key
+*.p12
+*.pfx
+
+# Local runtime state, archives, backups, diagnostics and generated packages.
+/state/
+/archives/
+/backups/
+/logs/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+*.parquet
+/trial.json
+/progress.log

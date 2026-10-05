@@ -1,1 +1,0 @@
-// Agent register command implementation.

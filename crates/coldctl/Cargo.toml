@@ -1,6 +1,6 @@
 [package]
 name = "coldctl"
-description = "CLI for analyzing, archiving, and querying cold database data"
+description = "CLI for analyzing, archiving, verifying, and restoring PostgreSQL data"
 readme = "../../README.md"
 keywords = ["database", "archive", "postgresql", "parquet", "cli"]
 categories = ["command-line-utilities", "database"]
@@ -14,3 +14,8 @@ homepage.workspace = true
 clap.workspace = true
 coldctl-core.workspace = true
 coldctl-cloud.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

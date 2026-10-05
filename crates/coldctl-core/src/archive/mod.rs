@@ -1,6 +1,9 @@
 pub mod batch;
 pub mod checkpoint;
+pub mod controls;
 pub mod executor;
 pub mod manifest;
 pub mod planner;
+pub mod progress;
+pub mod recovery;
 pub mod verifier;
