@@ -3,6 +3,7 @@ use clap::Subcommand;
 pub mod agent;
 pub mod analyze;
 pub mod archive;
+pub mod connector;
 pub mod destination;
 pub mod init;
 pub mod jobs;
@@ -13,6 +14,8 @@ pub mod status;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Install and manage independently signed connector packages.
+    Connector(connector::Args),
     /// Initialize local state (safe to run repeatedly).
     Init,
     /// Show local installation status without network access.

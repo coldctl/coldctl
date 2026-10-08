@@ -8,7 +8,10 @@ pub struct Args {
     /// Unique local source name (ASCII letters, digits, hyphens, underscores).
     #[arg(long)]
     name: String,
-    /// Password-free postgres://user@host:5432/database URL; supports sslmode=require|disable.
+    /// Environment variable containing a PEM CA bundle for MySQL/MongoDB certificate validation.
+    #[arg(long)]
+    tls_ca_env: Option<String>,
+    /// Password-free postgres://, mysql:// or mongodb:// URL; supports sslmode=require|disable.
     #[arg(long)]
     url: Option<String>,
     /// Name of an environment variable holding the full URL; its value is never stored.
@@ -23,12 +26,25 @@ pub fn run(
     args: Args,
     paths: &StatePaths,
     output: Output,
+    engine: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let connection = match (args.url, args.url_env) {
         (Some(url), None) => SourceConnection::from_url(&url, args.password_env)?,
-        (None, Some(variable)) => SourceConnection::from_url_env(variable)?,
+        (None, Some(variable)) => {
+            if engine == "mongodb" {
+                SourceConnection::from_mongodb_url_env(variable)?
+            } else if engine == "mysql" {
+                SourceConnection::from_mysql_url_env(variable)?
+            } else {
+                SourceConnection::from_url_env(variable)?
+            }
+        }
         _ => return Err("provide exactly one of --url and --url-env".into()),
     };
+    if connection.engine() != engine {
+        return Err("URL engine must match the source subcommand".into());
+    }
+    let connection = connection.with_ca_env(args.tls_ca_env)?;
     let source = sources::add(paths, &args.name, connection)?;
     match output {
         Output::Json => super::json(&serde_json::to_value(source)?)?,

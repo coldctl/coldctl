@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Connector error: {0}")]
+    Connector(#[from] coldctl_connector_runtime::Error),
     #[error("Archive/policy error: {0}")]
     Archive(&'static str),
     #[error("Archive job {job_id} failed: {reason}. Inspect it with `coldctl jobs show {job_id}`")]
@@ -85,6 +87,31 @@ impl Error {
         use FailureCategory::*;
         let (category, retryable, message) = match self {
             Self::JobFailed { failure, .. } => return failure.clone(),
+            Self::Connector(error) => {
+                use coldctl_connector_runtime::Error as C;
+                match error {
+                    C::Authentication => {
+                        (Authentication, false, "connector authentication rejected")
+                    }
+                    C::Permission => (Permission, false, "connector permission denied"),
+                    C::Schema => (Schema, false, "connector identity or schema changed"),
+                    C::Timeout => (Timeout, true, "connector operation timed out"),
+                    C::Unavailable => (Connectivity, true, "connector unavailable or exited"),
+                    C::OversizedRow => {
+                        (OversizedRow, false, "row exceeds the 64 KiB archive limit")
+                    }
+                    C::OutcomeUnknown => (
+                        Unknown,
+                        false,
+                        "connector write outcome unknown; reconcile target journal",
+                    ),
+                    _ => (
+                        Configuration,
+                        false,
+                        "connector configuration or protocol rejected",
+                    ),
+                }
+            }
             Self::Postgres { reason, .. } => {
                 let category = if reason.contains("authentication") {
                     Authentication

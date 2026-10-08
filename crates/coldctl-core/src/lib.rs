@@ -9,3 +9,7 @@ pub mod source;
 pub mod state;
 
 mod fs_security;
+
+pub mod connector_contract;
+
+pub mod connectors;

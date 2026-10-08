@@ -14,6 +14,36 @@ pub enum SourceConnection {
         tls: TlsMode,
         password_env: Option<String>,
     },
+    Mysql {
+        host: String,
+        port: u16,
+        database: String,
+        user: String,
+        tls: TlsMode,
+        password_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
+    },
+    MysqlUrlEnv {
+        variable: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
+    },
+    Mongodb {
+        host: String,
+        port: u16,
+        database: String,
+        user: String,
+        tls: TlsMode,
+        password_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
+    },
+    MongodbUrlEnv {
+        variable: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
+    },
     UrlEnv {
         variable: String,
     },
@@ -26,14 +56,18 @@ pub enum TlsMode {
     Disable,
 }
 
-// Intentionally not Debug or Serialize: resolved credentials must never enter logs/state.
-pub(super) struct ResolvedConnection {
+// Private pipe payload only: never Debug, logs, arguments, or durable state.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedConnection {
     pub host: String,
     pub port: u16,
     pub database: String,
     pub user: String,
     pub tls: TlsMode,
     pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_pem: Option<String>,
 }
 
 pub fn validate_name(name: &str) -> Result<(), Error> {
@@ -81,13 +115,18 @@ fn decode(value: &str) -> Result<String, Error> {
         .map_err(|_| Error::SourceConfiguration("URL fields must be valid UTF-8"))
 }
 
-fn parse_url(value: &str, allow_password: bool) -> Result<ResolvedConnection, Error> {
+fn parse_url(value: &str, allow_password: bool, engine: &str) -> Result<ResolvedConnection, Error> {
     let url = url::Url::parse(value).map_err(|_| {
-        Error::SourceConfiguration("expected a PostgreSQL URL with host, user, and database")
+        Error::SourceConfiguration("expected a database URL with host, user, and database")
     })?;
-    if !matches!(url.scheme(), "postgres" | "postgresql") || url.fragment().is_some() {
+    if !(if matches!(engine, "mysql" | "mongodb") {
+        url.scheme() == engine
+    } else {
+        matches!(url.scheme(), "postgres" | "postgresql")
+    }) || url.fragment().is_some()
+    {
         return Err(Error::SourceConfiguration(
-            "use postgres:// or postgresql:// without a URL fragment",
+            "use the selected database scheme without a URL fragment",
         ));
     }
     if !allow_password && url.password().is_some() {
@@ -130,7 +169,11 @@ fn parse_url(value: &str, allow_password: bool) -> Result<ResolvedConnection, Er
             }
         };
     }
-    let port = url.port().unwrap_or(5432);
+    let port = url.port().unwrap_or(match engine {
+        "mysql" => 3306,
+        "mongodb" => 27017,
+        _ => 5432,
+    });
     if port == 0 {
         return Err(Error::SourceConfiguration(
             "port must be between 1 and 65535",
@@ -142,13 +185,47 @@ fn parse_url(value: &str, allow_password: bool) -> Result<ResolvedConnection, Er
         database,
         user,
         tls,
+        ca_pem: None,
         password: url.password().map(decode).transpose()?,
     })
 }
 
 impl SourceConnection {
     pub fn from_url(url: &str, password_env: Option<String>) -> Result<Self, Error> {
-        let parsed = parse_url(url, false)?;
+        let engine = if url.starts_with("mongodb://") {
+            "mongodb"
+        } else if url.starts_with("mysql://") {
+            "mysql"
+        } else {
+            "postgres"
+        };
+        let parsed = parse_url(url, false, engine)?;
+        if engine == "mongodb" {
+            let connection = Self::Mongodb {
+                host: parsed.host,
+                port: parsed.port,
+                database: parsed.database,
+                user: parsed.user,
+                tls: parsed.tls,
+                password_env,
+                ca_env: None,
+            };
+            connection.validate()?;
+            return Ok(connection);
+        }
+        if engine == "mysql" {
+            let connection = Self::Mysql {
+                host: parsed.host,
+                port: parsed.port,
+                database: parsed.database,
+                user: parsed.user,
+                tls: parsed.tls,
+                password_env,
+                ca_env: None,
+            };
+            connection.validate()?;
+            return Ok(connection);
+        }
         let connection = Self::Postgres {
             host: parsed.host,
             port: parsed.port,
@@ -161,15 +238,90 @@ impl SourceConnection {
         Ok(connection)
     }
 
+    pub fn with_ca_env(mut self, ca: Option<String>) -> Result<Self, Error> {
+        if let Some(value) = &ca {
+            validate_env(value)?;
+        }
+        match &mut self {
+            Self::Mongodb { ca_env, .. }
+            | Self::MongodbUrlEnv { ca_env, .. }
+            | Self::Mysql { ca_env, .. }
+            | Self::MysqlUrlEnv { ca_env, .. } => *ca_env = ca,
+            _ if ca.is_some() => {
+                return Err(Error::SourceConfiguration(
+                    "--tls-ca-env currently applies to MySQL and MongoDB",
+                ));
+            }
+            _ => {}
+        }
+        Ok(self)
+    }
+    pub fn engine(&self) -> &'static str {
+        match self {
+            Self::Mysql { .. } | Self::MysqlUrlEnv { .. } => "mysql",
+            Self::Mongodb { .. } | Self::MongodbUrlEnv { .. } => "mongodb",
+            _ => "postgres",
+        }
+    }
+    pub fn from_mysql_url_env(variable: String) -> Result<Self, Error> {
+        validate_env(&variable)?;
+        Ok(Self::MysqlUrlEnv {
+            variable,
+            ca_env: None,
+        })
+    }
+
+    pub fn from_mongodb_url_env(variable: String) -> Result<Self, Error> {
+        validate_env(&variable)?;
+        Ok(Self::MongodbUrlEnv {
+            variable,
+            ca_env: None,
+        })
+    }
+
     pub fn from_url_env(variable: String) -> Result<Self, Error> {
         validate_env(&variable)?;
         Ok(Self::UrlEnv { variable })
     }
 
     pub fn validate(&self) -> Result<(), Error> {
+        if let Self::Mongodb {
+            ca_env: Some(v), ..
+        }
+        | Self::MongodbUrlEnv {
+            ca_env: Some(v), ..
+        }
+        | Self::Mysql {
+            ca_env: Some(v), ..
+        }
+        | Self::MysqlUrlEnv {
+            ca_env: Some(v), ..
+        } = self
+        {
+            validate_env(v)?;
+        }
         match self {
-            Self::UrlEnv { variable } => validate_env(variable),
-            Self::Postgres {
+            Self::MongodbUrlEnv { variable, .. }
+            | Self::UrlEnv { variable }
+            | Self::MysqlUrlEnv { variable, .. } => validate_env(variable),
+            Self::Mongodb {
+                host,
+                port,
+                database,
+                user,
+                password_env,
+                tls: _,
+                ca_env: _,
+            }
+            | Self::Mysql {
+                host,
+                port,
+                database,
+                user,
+                password_env,
+                ..
+            }
+            | Self::Postgres {
                 host,
                 port,
                 database,
@@ -193,16 +345,38 @@ impl SourceConnection {
         }
     }
 
-    pub(super) fn resolve(&self) -> Result<ResolvedConnection, Error> {
+    pub fn resolve(&self) -> Result<ResolvedConnection, Error> {
         self.validate()?;
         let environment = |variable: &str| {
             std::env::var(variable)
             .ok().filter(|s| !s.is_empty())
             .ok_or(Error::SourceConfiguration("credential environment variable is missing, empty, or not Unicode; set the variable referenced by `source show`"))
         };
-        match self {
-            Self::UrlEnv { variable } => parse_url(&environment(variable)?, true),
-            Self::Postgres {
+        let mut resolved = match self {
+            Self::MongodbUrlEnv { variable, .. }
+            | Self::UrlEnv { variable }
+            | Self::MysqlUrlEnv { variable, .. } => {
+                parse_url(&environment(variable)?, true, self.engine())
+            }
+            Self::Mongodb {
+                host,
+                port,
+                database,
+                user,
+                password_env,
+                tls,
+                ..
+            }
+            | Self::Mysql {
+                host,
+                port,
+                database,
+                user,
+                password_env,
+                tls,
+                ..
+            }
+            | Self::Postgres {
                 host,
                 port,
                 database,
@@ -215,8 +389,36 @@ impl SourceConnection {
                 database: database.clone(),
                 user: user.clone(),
                 tls: *tls,
+                ca_pem: None,
                 password: password_env.as_deref().map(environment).transpose()?,
             }),
+        }?;
+        if let Self::Mongodb {
+            ca_env: Some(variable),
+            ..
         }
+        | Self::MongodbUrlEnv {
+            ca_env: Some(variable),
+            ..
+        }
+        | Self::Mysql {
+            ca_env: Some(variable),
+            ..
+        }
+        | Self::MysqlUrlEnv {
+            ca_env: Some(variable),
+            ..
+        } = self
+        {
+            if resolved.tls != TlsMode::Require {
+                return Err(Error::SourceConfiguration("custom CA requires TLS"));
+            }
+            let pem = environment(variable)?;
+            if pem.len() > 65536 {
+                return Err(Error::SourceConfiguration("CA bundle exceeds 64 KiB"));
+            }
+            resolved.ca_pem = Some(pem);
+        }
+        Ok(resolved)
     }
 }

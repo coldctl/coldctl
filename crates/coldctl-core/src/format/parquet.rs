@@ -84,11 +84,23 @@ pub fn encode(
             }
             "text" | "varchar" | "bpchar" | "numeric" | "date" | "timestamp" | "timestamptz"
             | "uuid" | "json" | "jsonb" => (DataType::Utf8, Arc::new(StringArray::from(values))),
+            crate::format::bson::ID_TYPE | crate::format::bson::DOCUMENT_TYPE => {
+                (DataType::Utf8, Arc::new(StringArray::from(values)))
+            }
+            kind if crate::source::mysql_types::parts(kind).is_ok() => {
+                (DataType::Utf8, Arc::new(StringArray::from(values)))
+            }
             _ => return Err(Error::Archive("unsupported Parquet column type")),
         };
         fields.push(
             Field::new(&column.name, kind, column.nullable).with_metadata(HashMap::from([(
-                "coldctl.postgres_type".into(),
+                if column.postgres_type.starts_with("mysql:")
+                    || column.postgres_type.starts_with("mongodb:")
+                {
+                    "coldctl.native_type".into()
+                } else {
+                    "coldctl.postgres_type".into()
+                },
                 column.postgres_type.clone(),
             )])),
         );
@@ -98,6 +110,14 @@ pub fn encode(
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(encoding_error)?;
     let temp = tempfile::NamedTempFile::new().map_err(encoding_error)?;
     let properties = WriterProperties::builder()
+        .set_key_value_metadata(if columns == crate::format::bson::columns() {
+            Some(vec![parquet::format::KeyValue::new(
+                "coldctl.document_encoding".into(),
+                Some("bson-hex-v1".into()),
+            )])
+        } else {
+            None
+        })
         .set_compression(Compression::SNAPPY)
         .set_max_row_group_size(batch.rows.len().max(1))
         .build();

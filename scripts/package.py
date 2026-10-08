@@ -20,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--target", required=True, choices=["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"])
     parser.add_argument("--require-clean", action="store_true")
+    parser.add_argument("--component", choices=["coldctl", "coldctl-connector-postgres", "coldctl-connector-mysql", "coldctl-connector-mongodb"], default="coldctl")
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     dirty = bool(run("git", "status", "--porcelain"))
@@ -28,16 +29,16 @@ def main():
     tag = os.environ.get("GITHUB_REF", "")
     if tag.startswith("refs/tags/") and tag != "refs/tags/v" + version:
         raise SystemExit("Release tag must match Cargo.toml version")
-    subprocess.run(["cargo", "build", "--locked", "--release", "-p", "coldctl", "--target", args.target], cwd=ROOT, check=True)
-    binary_name = "coldctl.exe" if "windows" in args.target else "coldctl"
+    subprocess.run(["cargo", "build", "--locked", "--release", "-p", args.component, "--target", args.target], cwd=ROOT, check=True)
+    binary_name = args.component + (".exe" if "windows" in args.target else "")
     binary = ROOT / "target" / args.target / "release" / binary_name
-    if run(str(binary), "--version") != "coldctl " + version:
+    if args.component == "coldctl" and run(str(binary), "--version") != "coldctl " + version:
         raise SystemExit("Binary version mismatch")
     # Run the exact packaged executable with a clean installation and repeated init.
     with tempfile.TemporaryDirectory(prefix="coldctl-package-") as tmp:
-        for command in ["init", "init", "status"]:
+        for command in (["init", "init", "status"] if args.component == "coldctl" else []):
             subprocess.run([str(binary), "--data-dir", str(Path(tmp) / "state"), command], check=True)
-    name = "coldctl-" + version + "-" + args.target
+    name = args.component + "-" + version + "-" + args.target
     output = ROOT / "target" / "packages"
     output.mkdir(parents=True, exist_ok=True)
     extension = ".zip" if "windows" in args.target else ".tar.gz"
@@ -48,14 +49,14 @@ def main():
         folder = Path(tmp) / name
         folder.mkdir()
         shutil.copy2(binary, folder / binary_name)
-        for path in ["LICENSE", "README.md", "Cargo.lock", "PRODUCTION_RELEASE_CHECKLIST.md"]:
+        for path in ["LICENSE", "README.md", "Cargo.lock", "PRODUCTION_RELEASE_CHECKLIST.md", "CONNECTOR_RUNTIME.md", "CONNECTOR_INSTALLATION.md", "MYSQL_CONNECTOR.md", "MONGODB_PHASE5.md"]:
             shutil.copy2(ROOT / path, folder / path)
         shutil.copytree(ROOT / "docs", folder / "docs")
-        info = {"version": version, "target": args.target, "commit": run("git", "rev-parse", "HEAD"),
+        info = {"component": args.component, "version": version, "target": args.target, "commit": run("git", "rev-parse", "HEAD"),
                 "dirty": dirty, "rustc": run("rustc", "--version"), "cargo": run("cargo", "--version"),
                 "lockfile_sha256": hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest(),
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 8, "manifest_format": 2}
+                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 11, "manifest_formats": [2,3,4]}
         (folder / "BUILD-INFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
         if extension == ".zip":
             with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as z:

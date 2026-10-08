@@ -20,6 +20,9 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         [1, 2, 3, 4, 5, 6] => Ok(6),
         [1, 2, 3, 4, 5, 6, 7] => Ok(7),
         [1, 2, 3, 4, 5, 6, 7, 8] => Ok(8),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9] => Ok(9),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] => Ok(10),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] => Ok(11),
         _ => Err(Error::InvalidState(
             "unsupported migration history; use a compatible Coldctl version".into(),
         )),
@@ -97,6 +100,33 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
             .map_err(sql_error)?;
         conn.execute(
             "INSERT INTO schema_migrations VALUES (8, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 8 {
+        conn.execute_batch(include_str!("../../migrations/0009_mysql.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(9,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 9 {
+        conn.execute_batch(include_str!("../../migrations/0010_document_cursors.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(10,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 10 {
+        conn.execute_batch(include_str!("../../migrations/0011_mongodb.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(11,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

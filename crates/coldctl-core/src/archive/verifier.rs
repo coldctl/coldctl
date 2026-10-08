@@ -152,7 +152,15 @@ pub(crate) fn verify_batches(paths: &StatePaths, job: &store::Job) -> Result<(),
             if field.name() != &column.name
                 || field.is_nullable() != column.nullable
                 || field.data_type() != &kind
-                || field.metadata().get("coldctl.postgres_type") != Some(&column.postgres_type)
+                || field.metadata().get(
+                    if column.postgres_type.starts_with("mysql:")
+                        || column.postgres_type.starts_with("mongodb:")
+                    {
+                        "coldctl.native_type"
+                    } else {
+                        "coldctl.postgres_type"
+                    },
+                ) != Some(&column.postgres_type)
             {
                 return Err(invalid(()));
             }
@@ -170,15 +178,46 @@ pub(crate) fn verify_batches(paths: &StatePaths, job: &store::Job) -> Result<(),
             }
             for index in 0..batch.num_rows() {
                 let key = if let Some(a) = keys.as_any().downcast_ref::<Int64Array>() {
-                    a.value(index)
+                    super::key::ArchiveKey::from(a.value(index))
                 } else if let Some(a) = keys.as_any().downcast_ref::<Int32Array>() {
-                    i64::from(a.value(index))
+                    super::key::ArchiveKey::from(i64::from(a.value(index)))
                 } else if let Some(a) = keys.as_any().downcast_ref::<Int16Array>() {
-                    i64::from(a.value(index))
+                    super::key::ArchiveKey::from(i64::from(a.value(index)))
+                } else if let Some(a) = keys.as_any().downcast_ref::<arrow_array::StringArray>() {
+                    if job.plan.columns[key_index].postgres_type == crate::format::bson::ID_TYPE {
+                        if job.plan.columns != crate::format::bson::columns() {
+                            return Err(invalid(()));
+                        }
+                        let raw = batch
+                            .column(1)
+                            .as_any()
+                            .downcast_ref::<arrow_array::StringArray>()
+                            .ok_or_else(|| invalid(()))?;
+                        if raw.is_null(index) {
+                            return Err(invalid(()));
+                        }
+                        let row = vec![
+                            Some(a.value(index).to_owned()),
+                            Some(raw.value(index).to_owned()),
+                        ];
+                        crate::format::bson::validate_eligibility(
+                            &row,
+                            &job.plan.policy.config.time_column,
+                            &job.plan.cutoff_utc,
+                        )?;
+                        crate::format::bson::key(a.value(index))?
+                    } else {
+                        super::key::ArchiveKey::from(crate::source::mysql_types::cursor(
+                            &job.plan.columns[key_index].postgres_type,
+                            a.value(index),
+                        )?)
+                    }
                 } else {
                     return Err(invalid(()));
                 };
-                if last.is_some_and(|v| key <= v) || checkpoint.upper.is_none_or(|v| key > v) {
+                if last.is_some_and(|v| !key.follows(v))
+                    || checkpoint.upper.is_none_or(|v| !key.within(v))
+                {
                     return Err(Error::Archive(
                         "archive primary keys are out of order or bounds",
                     ));

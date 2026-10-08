@@ -121,7 +121,7 @@ fn parquet_round_trip_preserves_types_nulls_unicode_and_exact_decimals() {
         },
     ];
     let batch = DataBatch {
-        last_key: 2,
+        last_key: 2.into(),
         rows: vec![
             vec![
                 Some(i64::MIN.to_string()),

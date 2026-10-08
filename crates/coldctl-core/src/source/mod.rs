@@ -1,15 +1,18 @@
+use crate::archive::key::ArchiveKey;
 pub mod config;
+pub mod connector;
+pub mod mysql_types;
 pub mod postgres;
 pub mod postgres_archive;
 pub mod postgres_restore;
 
 use crate::error::Error;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 
 pub use config::SourceConnection;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub id: String,
     pub name: String,
@@ -18,20 +21,20 @@ pub struct Source {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub database: String,
     pub user: String,
     pub server_version: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Discovery {
     pub schemas: Vec<String>,
     pub tables: Vec<Table>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Table {
     pub schema: String,
     pub name: String,
@@ -42,7 +45,7 @@ pub struct Table {
     pub indexes: Vec<Index>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
@@ -50,7 +53,7 @@ pub struct Column {
     pub archive_time_candidate: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
     pub method: String,
@@ -74,11 +77,16 @@ pub trait ArchiveSource {
     fn upper_key(
         &mut self,
         plan: &crate::archive::planner::ArchivePlan,
-    ) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
+    ) -> impl Future<Output = Result<Option<ArchiveKey>, Error>> + Send;
     fn read_batch(
         &mut self,
         plan: &crate::archive::planner::ArchivePlan,
-        last: Option<i64>,
-        upper: i64,
+        last: Option<ArchiveKey>,
+        upper: ArchiveKey,
     ) -> impl Future<Output = Result<Option<crate::archive::batch::DataBatch>, Error>> + Send;
 }
+
+/// Engine-selected supervised source, archive and restore facades.
+pub use postgres::PostgresSource as ConnectorSource;
+pub use postgres_archive::PostgresArchive as ConnectorArchive;
+pub use postgres_restore as restore;

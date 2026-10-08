@@ -199,8 +199,176 @@ async fn connection_failures_are_safe_and_bounded() {
         listener.local_addr().unwrap().port()
     );
     let source = PostgresSource::new(SourceConnection::from_url(&url, None).unwrap());
-    let result = tokio::time::timeout(std::time::Duration::from_secs(12), source.test_connection())
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), source.test_connection())
         .await
         .unwrap();
-    assert!(result.unwrap_err().to_string().contains("10 seconds"));
+    assert!(result.unwrap_err().to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn resume_rejects_a_changed_connector_before_connecting() {
+    let connection =
+        SourceConnection::from_url("postgres://user@localhost/db?sslmode=disable", None).unwrap();
+    let pin = coldctl_connector_protocol::model::ConnectorPin {
+        id: "postgres".into(),
+        version: "old".into(),
+        sha256: "0".repeat(64),
+    };
+    let error = coldctl_core::source::connector::launch_pinned(&connection, Some(&pin))
+        .await
+        .err()
+        .expect("changed executable must fail");
+    assert!(error.to_string().contains("digest changed"));
+}
+
+#[test]
+fn mysql_configuration_keeps_engine_and_secret_references_without_resolving_them() {
+    let (_temp, paths) = setup();
+    let config = SourceConnection::from_url(
+        "mysql://reader@localhost/data",
+        Some("ABSENT_MYSQL_PASSWORD".into()),
+    )
+    .unwrap()
+    .with_ca_env(Some("ABSENT_MYSQL_CA".into()))
+    .unwrap();
+    assert_eq!(config.engine(), "mysql");
+    let saved = sources::add(&paths, "mysql", config.clone()).unwrap();
+    assert_eq!(saved.source_type, "mysql");
+    assert_eq!(sources::show(&paths, "mysql").unwrap().connection, config);
+    if let SourceConnection::Mysql { port, tls, .. } = config {
+        assert_eq!(port, 3306);
+        assert_eq!(tls, TlsMode::Require);
+    } else {
+        panic!("wrong engine")
+    }
+    let reference = SourceConnection::from_mysql_url_env("ABSENT_MYSQL_URL".into()).unwrap();
+    assert_eq!(reference.engine(), "mysql");
+    assert!(reference.resolve().is_err());
+    for value in [
+        "mysql://u:secret@host/db",
+        "mysql://u@host/db?sslmode=prefer",
+        "mysql://u@host/db?local_infile=true",
+    ] {
+        assert!(SourceConnection::from_url(value, None).is_err());
+    }
+}
+
+#[test]
+fn mongodb_configuration_keeps_engine_and_secret_references_without_resolving_them() {
+    let (_temp, paths) = setup();
+    let config = SourceConnection::from_url(
+        "mongodb://reader@localhost/data",
+        Some("ABSENT_MONGODB_PASSWORD".into()),
+    )
+    .unwrap()
+    .with_ca_env(Some("ABSENT_MONGODB_CA".into()))
+    .unwrap();
+    assert_eq!(config.engine(), "mongodb");
+    let saved = sources::add(&paths, "mongodb", config.clone()).unwrap();
+    assert_eq!(saved.source_type, "mongodb");
+    assert_eq!(sources::show(&paths, "mongodb").unwrap().connection, config);
+    if let SourceConnection::Mongodb { port, tls, .. } = config {
+        assert_eq!(port, 27017);
+        assert_eq!(tls, TlsMode::Require);
+    } else {
+        panic!("wrong engine")
+    }
+    let reference = SourceConnection::from_mongodb_url_env("ABSENT_MONGODB_URL".into()).unwrap();
+    assert_eq!(reference.engine(), "mongodb");
+    assert!(reference.resolve().is_err());
+    for value in [
+        "mongodb://u:secret@host/db",
+        "mongodb://u@host/db?sslmode=prefer",
+        "mongodb://u@host/db?authSource=admin",
+    ] {
+        assert!(SourceConnection::from_url(value, None).is_err());
+    }
+}
+
+#[test]
+fn mysql_migration_preserves_existing_source_policy_and_foreign_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StatePaths::resolve(Some(temp.path())).unwrap();
+    let conn = Connection::open(paths.database()).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+    )
+    .unwrap();
+    for (index, sql) in [
+        include_str!("../migrations/0001_initial.sql"),
+        include_str!("../migrations/0002_sources.sql"),
+        include_str!("../migrations/0003_destinations.sql"),
+        include_str!("../migrations/0004_archive.sql"),
+        include_str!("../migrations/0005_durability.sql"),
+        include_str!("../migrations/0006_execution.sql"),
+        include_str!("../migrations/0007_observability.sql"),
+        include_str!("../migrations/0008_recovery.sql"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        conn.execute_batch(sql).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(?1,'original')",
+            [index as i64 + 1],
+        )
+        .unwrap();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO installation VALUES(?1,'original','0.1.1')",
+        [&id],
+    )
+    .unwrap();
+    drop(conn);
+    let old = sources::add(&paths, "old", connection()).unwrap();
+    coldctl_core::state::destinations::add_local(&paths, "disk", &temp.path().join("archives"))
+        .unwrap();
+    let policy = coldctl_core::state::archive::policy_create(
+        &paths,
+        "p",
+        "old",
+        "disk",
+        coldctl_core::policy::model::PolicyConfig {
+            schema: "public".into(),
+            table: "events".into(),
+            time_column: "created_at".into(),
+            older_than_days: 30,
+            batch_size: 2,
+            equals_column: None,
+            equals_value: None,
+        },
+    )
+    .unwrap();
+    state::initialize(&paths, "test").unwrap();
+    assert_eq!(sources::show(&paths, "old").unwrap().id, old.id);
+    assert_eq!(
+        coldctl_core::state::archive::policy_show(&paths, "p")
+            .unwrap()
+            .id,
+        policy.id
+    );
+    sources::add(
+        &paths,
+        "mysql",
+        SourceConnection::from_url("mysql://u@localhost/db", None).unwrap(),
+    )
+    .unwrap();
+    sources::add(
+        &paths,
+        "mongodb",
+        SourceConnection::from_url("mongodb://u@localhost/db", None).unwrap(),
+    )
+    .unwrap();
+    let conn = Connection::open(paths.database()).unwrap();
+    assert!(
+        conn.prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none()
+    );
+    assert!(sources::remove(&paths, "old").is_err());
 }

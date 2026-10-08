@@ -1,0 +1,52 @@
+{
+  "sequence": 1,
+  "payload": {
+    "kind": "rows",
+    "columns": [
+      {
+        "name": "id",
+        "logical_type": "unsigned",
+        "native_type": "bigint unsigned",
+        "nullable": false,
+        "parameters": {}
+      },
+      {
+        "name": "amount",
+        "logical_type": "decimal",
+        "native_type": "decimal",
+        "nullable": false,
+        "parameters": {
+          "precision": "40",
+          "scale": "9"
+        }
+      }
+    ],
+    "rows": [
+      [
+        {
+          "kind": "unsigned",
+          "value": "18446744073709551615"
+        },
+        {
+          "kind": "decimal",
+          "value": "123456789012345678901234567890.123456789"
+        }
+      ]
+    ]
+  },
+  "next_cursor": {
+    "connector_id": "mysql",
+    "version": 1,
+    "encoding": "unsigned-le",
+    "token": [
+      255,
+      255,
+      255,
+      255,
+      255,
+      255,
+      255,
+      255
+    ]
+  }
+}

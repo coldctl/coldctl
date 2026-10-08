@@ -1,7 +1,7 @@
 use super::{Output, text};
 use coldctl_core::{
     paths::StatePaths,
-    source::{DataSource, postgres::PostgresSource},
+    source::{ConnectorSource, DataSource},
     state::sources,
 };
 
@@ -11,7 +11,7 @@ pub async fn run(
     output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = sources::show(paths, name)?;
-    let info = PostgresSource::new(source.connection)
+    let info = ConnectorSource::in_state(source.connection, paths)
         .test_connection()
         .await?;
     match output {

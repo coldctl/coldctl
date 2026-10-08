@@ -2,6 +2,7 @@ use super::{
     database::{at_path, open_initialized, sql_error},
     migrations,
 };
+use crate::archive::key::ArchiveKey;
 use crate::{
     archive::planner::ArchivePlan,
     error::Error,
@@ -19,6 +20,15 @@ pub(crate) fn open(paths: &StatePaths, writable: bool) -> Result<Connection, Err
         ));
     }
     Ok(conn)
+}
+
+pub(crate) fn require_document_schema(conn: &Connection) -> Result<(), Error> {
+    if migrations::version(conn)? < 10 {
+        return Err(Error::Archive(
+            "document archive schema needs an upgrade; run `coldctl init`",
+        ));
+    }
+    Ok(())
 }
 
 fn decode_policy(
@@ -132,7 +142,7 @@ pub struct Job {
     pub rows_processed: i64,
     pub bytes_written: i64,
     pub objects_created: i64,
-    pub last_key: Option<i64>,
+    pub last_key: Option<ArchiveKey>,
     pub error: Option<String>,
     pub cancel_requested: bool,
     pub verified_at: Option<String>,
@@ -219,13 +229,31 @@ pub(crate) fn job_create(
     plan: &ArchivePlan,
     source_id: &str,
     identity: &str,
-    upper: Option<i64>,
+    upper: Option<ArchiveKey>,
     controls: &crate::archive::controls::ExecutionControls,
 ) -> Result<Job, Error> {
+    if upper.is_some_and(|key| {
+        !key.matches_engine(
+            plan.connector_pin
+                .as_ref()
+                .map_or("postgres", |p| p.id.as_str()),
+        )
+    }) {
+        return Err(Error::Archive(
+            "upper key does not match the archive connector",
+        ));
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let json =
         serde_json::to_string(plan).map_err(|_| Error::Archive("cannot encode job snapshot"))?;
     let mut conn = open(paths, true)?;
+    if plan
+        .connector_pin
+        .as_ref()
+        .is_some_and(|pin| pin.id == "mongodb")
+    {
+        require_document_schema(&conn)?;
+    }
     let tx = conn
         .transaction()
         .map_err(|e| at_path(sql_error(e), paths))?;

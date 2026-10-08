@@ -248,3 +248,131 @@ fn live_cli_test_and_discover_json() {
             .success()
     );
 }
+
+#[test]
+fn mysql_source_configuration_cli_selects_engine_without_resolving_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path();
+    assert!(run(path, &["init"]).status.success());
+    assert!(
+        run(
+            path,
+            &[
+                "source",
+                "add",
+                "mysql",
+                "--name",
+                "mysql",
+                "--url-env",
+                "ABSENT_MYSQL_URL",
+                "--tls-ca-env",
+                "ABSENT_MYSQL_CA"
+            ]
+        )
+        .status
+        .success()
+    );
+    let output = run(path, &["source", "show", "mysql", "--output", "json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["source_type"], "mysql");
+    assert_eq!(value["connection"]["kind"], "mysql_url_env");
+    assert!(
+        !run(
+            path,
+            &[
+                "source",
+                "add",
+                "postgres",
+                "--name",
+                "wrong",
+                "--url",
+                "mysql://u@localhost/db"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            path,
+            &[
+                "source",
+                "add",
+                "mysql",
+                "--name",
+                "explicit",
+                "--url",
+                "mysql://u@localhost/db",
+                "--password-env",
+                "ABSENT_MYSQL_PASSWORD"
+            ]
+        )
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn mongodb_source_configuration_cli_selects_engine_without_resolving_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path();
+    assert!(run(path, &["init"]).status.success());
+    assert!(
+        run(
+            path,
+            &[
+                "source",
+                "add",
+                "mongodb",
+                "--name",
+                "mongodb",
+                "--url-env",
+                "ABSENT_MONGODB_URL",
+                "--tls-ca-env",
+                "ABSENT_MONGODB_CA"
+            ]
+        )
+        .status
+        .success()
+    );
+    let output = run(path, &["source", "show", "mongodb", "--output", "json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["source_type"], "mongodb");
+    assert_eq!(value["connection"]["kind"], "mongodb_url_env");
+    assert!(
+        !run(
+            path,
+            &[
+                "source",
+                "add",
+                "postgres",
+                "--name",
+                "wrong",
+                "--url",
+                "mongodb://u@localhost/db"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            path,
+            &[
+                "source",
+                "add",
+                "mongodb",
+                "--name",
+                "explicit",
+                "--url",
+                "mongodb://u@localhost/db",
+                "--password-env",
+                "ABSENT_MONGODB_PASSWORD"
+            ]
+        )
+        .status
+        .success()
+    );
+}

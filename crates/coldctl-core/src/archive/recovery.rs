@@ -85,9 +85,9 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
     }
     let version: Version =
         serde_json::from_slice(&bytes).map_err(|_| Error::Archive("invalid archive manifest"))?;
-    if version.format_version != 2 {
+    if !matches!(version.format_version, 2..=4) {
         return Err(Error::Archive(
-            "unsupported manifest version; standalone recovery requires format version 2",
+            "unsupported manifest version; standalone recovery supports formats 2, 3 and 4",
         ));
     }
     let manifest: Manifest =
@@ -103,6 +103,24 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
     }
     if manifest.source_deleted
         || manifest.plan.delete
+        || (manifest.format_version == 3)
+            != manifest
+                .plan
+                .connector_pin
+                .as_ref()
+                .is_some_and(|p| p.id == "mysql")
+        || (manifest.format_version == 4)
+            != manifest
+                .plan
+                .connector_pin
+                .as_ref()
+                .is_some_and(|p| p.id == "mongodb")
+        || manifest.upper_key.is_some_and(|key| {
+            (manifest.format_version == 4) != matches!(key, super::key::ArchiveKey::ObjectId(_))
+        })
+        || (manifest.format_version == 4
+            && (manifest.plan.columns != crate::format::bson::columns()
+                || manifest.plan.primary_key != "_id"))
         || manifest.rows < 0
         || manifest.objects.len() > MAX_OBJECTS
     {
@@ -116,7 +134,17 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
     if columns.is_empty()
         || columns.len() > 1600
         || columns.iter().any(|c| {
-            !names.insert(&c.name) || !crate::source::postgres_archive::supported(&c.postgres_type)
+            !names.insert(&c.name)
+                || !(if manifest.format_version == 4 {
+                    matches!(
+                        c.postgres_type.as_str(),
+                        crate::format::bson::ID_TYPE | crate::format::bson::DOCUMENT_TYPE
+                    )
+                } else if manifest.format_version == 3 {
+                    crate::source::mysql_types::parts(&c.postgres_type).is_ok()
+                } else {
+                    crate::source::postgres_archive::supported(&c.postgres_type)
+                })
         })
     {
         return Err(Error::Archive("invalid manifest columns"));
@@ -125,7 +153,15 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
         .iter()
         .find(|c| c.name == manifest.plan.primary_key)
         .ok_or(Error::Archive("missing primary key column"))?;
-    if key.nullable || !matches!(key.postgres_type.as_str(), "int2" | "int4" | "int8") {
+    if key.nullable
+        || !(if manifest.format_version == 4 {
+            key.postgres_type == crate::format::bson::ID_TYPE
+        } else if manifest.format_version == 3 {
+            crate::source::mysql_types::integer(&key.postgres_type)
+        } else {
+            matches!(key.postgres_type.as_str(), "int2" | "int4" | "int8")
+        })
+    {
         return Err(Error::Archive("unsupported manifest primary key"));
     }
     let mut total_rows = 0i64;
@@ -142,8 +178,8 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
                 .sha256
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || last.is_some_and(|n| entry.last_key <= n)
-            || manifest.upper_key.is_none_or(|n| entry.last_key > n)
+            || last.is_some_and(|n| !entry.last_key.follows(n))
+            || manifest.upper_key.is_none_or(|n| !entry.last_key.within(n))
         {
             return Err(Error::Archive("invalid manifest batch checkpoint"));
         }
@@ -181,7 +217,7 @@ fn load(directory: &Path) -> Result<Loaded, Error> {
 fn report(loaded: &Loaded, verified: bool) -> Inspection {
     Inspection {
         job_id: loaded.manifest.job_id.clone(),
-        format_version: 2,
+        format_version: loaded.manifest.format_version,
         directory: loaded.root.join(&loaded.manifest.job_id),
         rows: loaded.manifest.rows,
         objects: loaded.manifest.objects.len(),
@@ -249,6 +285,9 @@ fn insert(paths: &StatePaths, loaded: &Loaded, verified: bool) -> Result<(), Err
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(invalid)?;
     let manifest = &loaded.manifest;
+    if manifest.format_version == 4 {
+        store::require_document_schema(&tx)?;
+    }
     if tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1)",

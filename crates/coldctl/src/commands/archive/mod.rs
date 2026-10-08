@@ -56,7 +56,7 @@ pub enum Command {
     },
     /// List unreferenced staging candidates only; never deletes files.
     StagingList { id: String },
-    /// Restore into a new dedicated PostgreSQL target table; rerun to resume.
+    /// Restore into a new dedicated target table in the same database engine; rerun to resume.
     Restore {
         id: String,
         #[arg(long)]
@@ -95,10 +95,10 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
             eprintln!(
                 "Verifying archive before restore. Restore checkpoints are committed in the target database."
             );
-            let report = coldctl_core::source::postgres_restore::run(
+            let report = coldctl_core::source::restore::run(
                 paths,
                 &id,
-                coldctl_core::source::postgres_restore::Options {
+                coldctl_core::source::restore::Options {
                     target,
                     schema,
                     table,
@@ -119,10 +119,10 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
             table,
         } => {
             let signals = crate::execution::Signals::install()?;
-            let report = coldctl_core::source::postgres_restore::run(
+            let report = coldctl_core::source::restore::run(
                 paths,
                 &id,
-                coldctl_core::source::postgres_restore::Options {
+                coldctl_core::source::restore::Options {
                     target,
                     schema,
                     table,
@@ -339,7 +339,7 @@ fn print_recovery(report: &recovery::Inspection, output: Output) -> Result<(), s
 }
 
 fn print_restore(
-    report: &coldctl_core::source::postgres_restore::Report,
+    report: &coldctl_core::source::restore::Report,
     output: Output,
 ) -> Result<(), serde_json::Error> {
     if matches!(output, Output::Json) {
@@ -357,7 +357,7 @@ fn print_restore(
     Ok(())
 }
 
-fn restore_progress() -> coldctl_core::source::postgres_restore::Observer {
+fn restore_progress() -> coldctl_core::source::restore::Observer {
     let started = std::time::Instant::now();
     std::sync::Arc::new(move |stage, rows, batches| {
         eprintln!(

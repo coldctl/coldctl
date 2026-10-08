@@ -1,6 +1,7 @@
 use super::controls::{ExecutionControls, Shutdown};
 use super::progress::{Observer, Reporter, Stage};
 use super::{checkpoint as journal, manifest::ManifestObject, planner::ArchivePlan, verifier};
+use crate::archive::key::ArchiveKey;
 use crate::{
     destination::{
         ArchiveDestination, StoredObject,
@@ -9,7 +10,7 @@ use crate::{
     error::Error,
     format::parquet,
     paths::StatePaths,
-    source::{ArchiveSource, postgres_archive::PostgresArchive},
+    source::{ArchiveSource, ConnectorArchive},
     state::{archive as store, destinations, sources},
 };
 use std::io::Write;
@@ -61,7 +62,7 @@ pub async fn run_with_preflight_report(
     check_prior_runs(paths, &policy.id, options.allow_repeat)?;
     let source = sources::show(paths, &policy.source)?;
     let destination = destinations::show(paths, &policy.destination)?;
-    let mut reader = PostgresArchive::connect(source.connection).await?;
+    let mut reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
     reader.configure_timeouts(&controls).await?;
     let mut plan = reader.plan(policy, destination.path).await?;
     let source_identity = reader.source_identity(plan.table_oid).await?;
@@ -161,7 +162,12 @@ pub async fn resume_with_progress(
         // Verify all committed files before connecting to or reading the source.
         verifier::verify_batches(paths, &job)?;
         progress.stage(Stage::Connecting)?;
-        let mut reader = PostgresArchive::connect(source.connection).await?;
+        let mut reader = ConnectorArchive::connect_in_state(
+            source.connection,
+            paths,
+            job.plan.connector_pin.as_ref(),
+        )
+        .await?;
         if reader.identity() != checkpoint.source_identity {
             return Err(Error::Archive(
                 "resolved source endpoint or user changed; refusing resume",
@@ -292,12 +298,12 @@ pub(crate) fn manifest_file(
     paths: &StatePaths,
     id: &str,
     plan: &ArchivePlan,
-    upper: Option<i64>,
+    upper: Option<ArchiveKey>,
 ) -> Result<tempfile::NamedTempFile, Error> {
     let mut file =
         tempfile::NamedTempFile::new().map_err(|_| Error::Archive("cannot stage manifest"))?;
     let mut header = serde_json::to_string(
-        &serde_json::json!({"format_version":2,"job_id":id,"plan":plan,"upper_key":upper}),
+        &serde_json::json!({"format_version":match plan.connector_pin.as_ref().map(|p|p.id.as_str()) {Some("mongodb")=>4,Some("mysql")=>3,_=>2},"job_id":id,"plan":plan,"upper_key":upper}),
     )
     .map_err(|_| Error::Archive("cannot encode manifest"))?;
     header.pop();
@@ -562,6 +568,7 @@ mod tests {
         let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
         state::initialize(&paths, "test").unwrap();
         let plan = ArchivePlan {
+            connector_pin: None,
             safety: None,
             policy: Policy {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -597,7 +604,7 @@ mod tests {
             &plan,
             "original-source",
             "identity",
-            Some(3),
+            Some(3.into()),
             &ExecutionControls::default(),
         )
         .unwrap();
@@ -608,15 +615,17 @@ mod tests {
         cancel: Option<(StatePaths, String)>,
     }
     impl ArchiveSource for Reader {
-        async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<i64>, Error> {
+        async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<ArchiveKey>, Error> {
             panic!("resume must not recalculate the upper bound")
         }
         async fn read_batch(
             &mut self,
             plan: &ArchivePlan,
-            last: Option<i64>,
-            upper: i64,
+            last: Option<ArchiveKey>,
+            upper: ArchiveKey,
         ) -> Result<Option<DataBatch>, Error> {
+            let last = last.map(|k| k.integer()).transpose()?;
+            let upper = upper.integer()?;
             self.calls.push((last, upper));
             if let Some((paths, id)) = self.cancel.take() {
                 journal::cancel(&paths, &id)?;
@@ -627,7 +636,7 @@ mod tests {
                 .collect();
             Ok(keys.last().copied().map(|last_key| DataBatch {
                 rows: keys.iter().map(|n| vec![Some(n.to_string())]).collect(),
-                last_key,
+                last_key: last_key.into(),
             }))
         }
     }
@@ -770,7 +779,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; DELETE FROM schema_migrations WHERE version=8;").unwrap();
+        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -826,14 +835,14 @@ mod tests {
 
     struct FailingReader;
     impl ArchiveSource for FailingReader {
-        async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<i64>, Error> {
+        async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<ArchiveKey>, Error> {
             unreachable!()
         }
         async fn read_batch(
             &mut self,
             _: &ArchivePlan,
-            _: Option<i64>,
-            _: i64,
+            _: Option<ArchiveKey>,
+            _: ArchiveKey,
         ) -> Result<Option<DataBatch>, Error> {
             Err(Error::Filesystem {
                 path: "PRIVATE_ROW_OR_PASSWORD".into(),
@@ -917,14 +926,14 @@ mod tests {
             shutdown: Shutdown,
         }
         impl ArchiveSource for Interrupting {
-            async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<i64>, Error> {
+            async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<ArchiveKey>, Error> {
                 unreachable!()
             }
             async fn read_batch(
                 &mut self,
                 plan: &ArchivePlan,
-                last: Option<i64>,
-                upper: i64,
+                last: Option<ArchiveKey>,
+                upper: ArchiveKey,
             ) -> Result<Option<DataBatch>, Error> {
                 let result = self.inner.read_batch(plan, last, upper).await;
                 self.shutdown.request();
@@ -1152,7 +1161,7 @@ mod tests {
         let dest = LocalDestination::new(job.plan.destination_path.clone()).unwrap();
         let batch = DataBatch {
             rows: vec![vec![Some("1".into())], vec![Some("2".into())]],
-            last_key: 2,
+            last_key: 2.into(),
         };
         let file = parquet::encode(&job.plan.columns, &batch).unwrap();
         let staged_key = format!("{}/.staged-{}.parquet", job.id, uuid::Uuid::new_v4());
@@ -1165,12 +1174,143 @@ mod tests {
                     sha256: obj.sha256,
                 },
                 rows: 2,
-                last_key: 2,
+                last_key: 2.into(),
             },
             staged_key,
         };
         journal::prepare(paths, &job.id, 1, &entry).unwrap();
         entry
+    }
+
+    #[tokio::test]
+    async fn bson_object_ids_survive_publication_retry_and_state_loss() {
+        use crate::{archive::recovery, format::bson as codec};
+        use bson::{DateTime, doc, oid::ObjectId};
+        struct Documents {
+            rows: Vec<Vec<Option<String>>>,
+            calls: Vec<Option<ArchiveKey>>,
+        }
+        impl ArchiveSource for Documents {
+            async fn upper_key(&mut self, _: &ArchivePlan) -> Result<Option<ArchiveKey>, Error> {
+                panic!("resume must retain the frozen upper bound")
+            }
+            async fn read_batch(
+                &mut self,
+                plan: &ArchivePlan,
+                last: Option<ArchiveKey>,
+                upper: ArchiveKey,
+            ) -> Result<Option<DataBatch>, Error> {
+                self.calls.push(last);
+                let mut selected = Vec::new();
+                let mut final_key = None;
+                for row in &self.rows {
+                    let key = codec::key(row[0].as_deref().unwrap())?;
+                    if last.is_none_or(|last| key.follows(last)) && key.within(upper) {
+                        selected.push(row.clone());
+                        final_key = Some(key);
+                        if selected.len() == plan.policy.config.batch_size as usize {
+                            break;
+                        }
+                    }
+                }
+                Ok(final_key.map(|last_key| DataBatch {
+                    rows: selected,
+                    last_key,
+                }))
+            }
+        }
+        for published in [false, true] {
+            let (temp, paths, old) = fixture();
+            let mut plan = old.plan;
+            plan.connector_pin = Some(coldctl_connector_protocol::model::ConnectorPin {
+                id: "mongodb".into(),
+                version: "0.1.1".into(),
+                sha256: "a".repeat(64),
+            });
+            plan.primary_key = "_id".into();
+            plan.columns = codec::columns();
+            // Keys share the first eight bytes; the low 32 bits must not disappear.
+            let ids = [1u8, 2, 3].map(|last| {
+                let mut bytes = [255; 12];
+                bytes[11] = last;
+                ObjectId::from_bytes(bytes)
+            });
+            let rows = ids.iter().map(|id| {
+                let bytes = bson::to_vec(&doc! {"_id": id, "created_at": DateTime::from_millis(0), "nested": {"nullable": bson::Bson::Null}, "wide": i64::MAX}).unwrap();
+                codec::encode(&bytes, "created_at").unwrap()
+            }).collect::<Vec<_>>();
+            let job = store::job_create(
+                &paths,
+                &plan,
+                "document-source",
+                "collection-uuid",
+                Some(ArchiveKey::object_id(ids[2].bytes())),
+                &ExecutionControls::default(),
+            )
+            .unwrap();
+            let destination = LocalDestination::new(plan.destination_path.clone()).unwrap();
+            let batch = DataBatch {
+                rows: rows[..2].to_vec(),
+                last_key: ArchiveKey::object_id(ids[1].bytes()),
+            };
+            let file = parquet::encode(&plan.columns, &batch).unwrap();
+            let staged_key = format!("{}/.staged-{}.parquet", job.id, uuid::Uuid::new_v4());
+            let object = destination.put_file(&staged_key, file.path()).unwrap();
+            let entry = journal::Entry {
+                batch: ManifestObject {
+                    object: StoredObject {
+                        key: format!("{}/batch-00000001.parquet", job.id),
+                        bytes: object.bytes,
+                        sha256: object.sha256,
+                    },
+                    rows: 2,
+                    last_key: batch.last_key,
+                },
+                staged_key,
+            };
+            journal::prepare(&paths, &job.id, 1, &entry).unwrap();
+            if published {
+                publish(
+                    &destination,
+                    &entry.batch.object,
+                    &destination.object_path(&entry.staged_key).unwrap(),
+                )
+                .unwrap();
+            }
+            // Simulate a fresh worker after losing the publish acknowledgment.
+            let mut reader = Documents {
+                rows,
+                calls: Vec::new(),
+            };
+            let finished = execute(&paths, &job.id, &mut reader).await.unwrap();
+            assert_eq!(finished.rows_processed, 3);
+            assert_eq!(finished.objects_created, 2);
+            assert_eq!(
+                finished.last_key,
+                Some(ArchiveKey::object_id(ids[2].bytes()))
+            );
+            assert_eq!(reader.calls[0], Some(batch.last_key));
+            verifier::verify(&paths, &job.id).unwrap();
+            let directory = plan.destination_path.join(&job.id);
+            assert_eq!(recovery::inspect(&directory).unwrap().format_version, 4);
+            let fresh = StatePaths::resolve(Some(&temp.path().join("fresh-state"))).unwrap();
+            state::initialize(&fresh, "test").unwrap();
+            let imported = recovery::import(&fresh, &directory, None).unwrap();
+            assert_eq!(imported.last_key, finished.last_key);
+            assert_eq!(verifier::verify(&fresh, &job.id).unwrap().rows, 3);
+            // Even a plausible ObjectId cannot replace the integer domain in old archives.
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(directory.join("manifest.json")).unwrap())
+                    .unwrap();
+            manifest["format_version"] = 3.into();
+            assert!(serde_json::to_vec(&manifest).is_ok());
+            std::fs::write(
+                directory.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(recovery::inspect(&directory).is_err());
+        }
     }
     #[tokio::test]
     async fn recovers_prepared_and_published_batches_without_rereading_or_duplicates() {
@@ -1215,7 +1355,7 @@ mod tests {
             )
             .unwrap();
             journal::commit(&paths, &job.id, 1, &entry).unwrap();
-            let file = manifest_file(&paths, &job.id, &job.plan, Some(3)).unwrap();
+            let file = manifest_file(&paths, &job.id, &job.plan, Some(3.into())).unwrap();
             let (bytes, sha256) = fingerprint(file.path()).unwrap();
             let object = StoredObject {
                 key: format!("{}/manifest.json", job.id),

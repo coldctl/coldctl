@@ -7,3 +7,5 @@ pub mod planner;
 pub mod progress;
 pub mod recovery;
 pub mod verifier;
+
+pub mod key;

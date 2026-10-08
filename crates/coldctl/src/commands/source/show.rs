@@ -17,11 +17,46 @@ pub fn run(
                 source.source_type,
                 text(&source.created_at)
             );
+            if let SourceConnection::Mongodb {
+                ca_env: Some(v), ..
+            }
+            | SourceConnection::MongodbUrlEnv {
+                ca_env: Some(v), ..
+            }
+            | SourceConnection::Mysql {
+                ca_env: Some(v), ..
+            }
+            | SourceConnection::MysqlUrlEnv {
+                ca_env: Some(v), ..
+            } = &source.connection
+            {
+                println!("TLS CA env  {v}");
+            }
             match source.connection {
-                SourceConnection::UrlEnv { variable } => {
+                SourceConnection::MongodbUrlEnv { variable, .. }
+                | SourceConnection::UrlEnv { variable }
+                | SourceConnection::MysqlUrlEnv { variable, .. } => {
                     println!("URL env     {variable} (value hidden; resolved only when connecting)")
                 }
-                SourceConnection::Postgres {
+                SourceConnection::Mongodb {
+                    host,
+                    port,
+                    database,
+                    user,
+                    tls,
+                    password_env,
+                    ..
+                }
+                | SourceConnection::Mysql {
+                    host,
+                    port,
+                    database,
+                    user,
+                    tls,
+                    password_env,
+                    ..
+                }
+                | SourceConnection::Postgres {
                     host,
                     port,
                     database,

@@ -1,8 +1,14 @@
 [workspace]
+default-members = ["crates/coldctl"]
 members = [
     "crates/coldctl",
     "crates/coldctl-core",
     "crates/coldctl-cloud",
+    "crates/coldctl-connector-protocol",
+    "crates/coldctl-connector-runtime",
+    "crates/coldctl-connector-postgres",
+    "crates/coldctl-connector-mysql",
+    "crates/coldctl-connector-mongodb",
 ]
 resolver = "2"
 
@@ -17,3 +23,5 @@ homepage = "https://www.coldctl.com"
 coldctl-core = { version = "0.1.1", path = "crates/coldctl-core" }
 coldctl-cloud = { version = "0.1.1", path = "crates/coldctl-cloud" }
 clap = { version = "4", features = ["derive"] }
+
+coldctl-connector-protocol = { version = "0.1.1", path = "crates/coldctl-connector-protocol" }

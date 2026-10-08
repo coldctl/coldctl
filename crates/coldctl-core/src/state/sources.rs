@@ -22,7 +22,7 @@ fn source(raw: (String, String, String, String, String)) -> Result<Source, Error
         .map_err(|_| Error::InvalidState("invalid source configuration".into()))?;
     connection.validate()?;
     validate_name(&name)?;
-    if source_type != "postgres" {
+    if source_type != connection.engine() {
         return Err(Error::InvalidState("unsupported source type".into()));
     }
     Ok(Source {
@@ -44,10 +44,20 @@ pub fn add(paths: &StatePaths, name: &str, connection: SourceConnection) -> Resu
     validate_name(name)?;
     connection.validate()?;
     let conn = open_initialized(paths, true)?;
+    if connection.engine() == "mysql" && super::migrations::version(&conn)? < 9 {
+        return Err(Error::InvalidState(
+            "MySQL source schema needs an upgrade; run coldctl init".into(),
+        ));
+    }
+    if connection.engine() == "mongodb" && super::migrations::version(&conn)? < 11 {
+        return Err(Error::InvalidState(
+            "MongoDB source schema needs an upgrade; run coldctl init".into(),
+        ));
+    }
     let json = serde_json::to_string(&connection)
         .map_err(|_| Error::SourceConfiguration("unable to encode connection configuration"))?;
-    let changed = conn.execute("INSERT INTO sources (id, name, source_type, connection_json, created_at) VALUES (?1, ?2, 'postgres', ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ON CONFLICT(name) DO NOTHING",
-        (uuid::Uuid::new_v4().to_string(), name, json)).map_err(|e| at_path(sql_error(e), paths))?;
+    let changed = conn.execute("INSERT INTO sources (id, name, source_type, connection_json, created_at) VALUES (?1, ?2, ?4, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ON CONFLICT(name) DO NOTHING",
+        (uuid::Uuid::new_v4().to_string(), name, json, connection.engine())).map_err(|e| at_path(sql_error(e), paths))?;
     if changed == 0 {
         return Err(Error::SourceExists);
     }

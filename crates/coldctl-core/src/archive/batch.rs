@@ -1,3 +1,4 @@
+use crate::archive::key::ArchiveKey;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -7,9 +8,11 @@ pub struct ArchiveColumn {
     pub nullable: bool,
 }
 
-/// At most 1,000 rows; each row's JSON text representation is capped server-side at 64 KiB.
-/// Values are PostgreSQL text representations, with SQL NULL preserved separately.
+/// At most 1,000 rows. Relational values retain native text/hex with SQL NULL
+/// preserved separately; document envelopes retain raw BSON as canonical hex.
+/// Each connector must enforce the 64 KiB row transport budget before fetching payloads.
+#[derive(Serialize, Deserialize)]
 pub struct DataBatch {
     pub rows: Vec<Vec<Option<String>>>,
-    pub last_key: i64,
+    pub last_key: ArchiveKey,
 }

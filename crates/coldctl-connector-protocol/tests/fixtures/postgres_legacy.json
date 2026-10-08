@@ -1,0 +1,39 @@
+{
+  "columns": [
+    {
+      "name": "id",
+      "postgres_type": "int8",
+      "nullable": false
+    },
+    {
+      "name": "amount",
+      "postgres_type": "numeric",
+      "nullable": false
+    },
+    {
+      "name": "j",
+      "postgres_type": "json",
+      "nullable": true
+    },
+    {
+      "name": "ts",
+      "postgres_type": "timestamptz",
+      "nullable": false
+    }
+  ],
+  "rows": [
+    [
+      "0",
+      "NaN",
+      null,
+      "0001-01-01 00:00:00+00 BC"
+    ],
+    [
+      "9223372036854775807",
+      "12345678901234567890.1200",
+      " { \"a\": 1, \"a\": 2 } ",
+      "-infinity"
+    ]
+  ],
+  "last_key": 9223372036854775807
+}

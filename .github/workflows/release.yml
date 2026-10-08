@@ -35,6 +35,22 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/package.py --target ${{ matrix.target }} --require-clean
+      - run: python scripts/package.py --target ${{ matrix.target }} --component coldctl-connector-postgres --require-clean
+      - run: python scripts/package.py --target ${{ matrix.target }} --component coldctl-connector-mysql --require-clean
+      - run: python scripts/package.py --target ${{ matrix.target }} --component coldctl-connector-mongodb --require-clean
+      - shell: bash
+        run: |
+          for engine in postgres mysql mongodb; do
+            binary="target/${{ matrix.target }}/release/coldctl-connector-$engine"
+            if [[ "$RUNNER_OS" == "Windows" ]]; then binary="$binary.exe"; fi
+            python scripts/connector_targets.py --binary "$binary" --target "${{ matrix.target }}" --out "target/unsigned-connector-targets/$engine"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-connector-targets-${{ matrix.target }}
+          path: target/unsigned-connector-targets/*
+          if-no-files-found: error
+          retention-days: 30
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: |

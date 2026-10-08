@@ -4,7 +4,7 @@ use clap::Args as ClapArgs;
 use coldctl_core::{
     analysis::{Analysis, Finding},
     paths::StatePaths,
-    source::{DataSource, postgres::PostgresSource},
+    source::{ConnectorSource, DataSource},
     state::sources,
 };
 
@@ -18,7 +18,9 @@ pub struct Args {
 
 pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
     let source = sources::show(paths, &args.source)?;
-    let analysis = PostgresSource::new(source.connection).analyze().await?;
+    let analysis = ConnectorSource::in_state(source.connection, paths)
+        .analyze()
+        .await?;
     match args.output {
         Output::Json => println!(
             "{}",

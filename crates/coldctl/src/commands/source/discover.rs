@@ -1,7 +1,7 @@
 use super::{Output, text};
 use coldctl_core::{
     paths::StatePaths,
-    source::{DataSource, postgres::PostgresSource},
+    source::{ConnectorSource, DataSource},
     state::sources,
 };
 
@@ -11,7 +11,9 @@ pub async fn run(
     output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = sources::show(paths, name)?;
-    let discovery = PostgresSource::new(source.connection).discover().await?;
+    let discovery = ConnectorSource::in_state(source.connection, paths)
+        .discover()
+        .await?;
     match output {
         Output::Json => super::json(&serde_json::to_value(discovery)?)?,
         Output::Table => {

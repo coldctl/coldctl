@@ -1,9 +1,9 @@
 //! Metadata-based archival assessment. No retention rules or deletion eligibility are inferred.
 use crate::source::{Discovery, Table};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TableStatistics {
     /// Physical storage includes TOAST and indexes, not predicted archive size.
     pub total_bytes: Option<i64>,
@@ -13,7 +13,7 @@ pub struct TableStatistics {
     pub estimated_changes_since_analyze: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TimeCandidate {
     pub column: String,
     pub data_type: String,
@@ -24,7 +24,7 @@ pub struct TimeCandidate {
     pub partial_range_indexes: Vec<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Finding {
     MissingPrimaryKey,
@@ -33,7 +33,7 @@ pub enum Finding {
     PartitionedParent,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AnalyzedTable {
     pub table: Table,
     pub statistics: TableStatistics,
@@ -41,15 +41,15 @@ pub struct AnalyzedTable {
     pub findings: Vec<Finding>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Analysis {
     pub schemas: Vec<String>,
     pub tables: Vec<AnalyzedTable>,
-    pub method: &'static str,
-    pub timestamp_ranges: &'static str,
+    pub method: String,
+    pub timestamp_ranges: String,
 }
 
-pub(crate) fn assess(
+pub fn assess(
     discovery: Discovery,
     mut statistics: BTreeMap<(String, String), TableStatistics>,
 ) -> Analysis {
@@ -120,8 +120,8 @@ pub(crate) fn assess(
     Analysis {
         schemas: discovery.schemas,
         tables,
-        method: "metadata_only",
-        timestamp_ranges: "not_measured",
+        method: "metadata_only".into(),
+        timestamp_ranges: "not_measured".into(),
     }
 }
 

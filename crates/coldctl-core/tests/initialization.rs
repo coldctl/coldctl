@@ -89,11 +89,11 @@ fn newer_schema_and_invalid_identity_are_rejected() {
     let (_temp, paths) = setup();
     state::initialize(&paths, "test").unwrap();
     let conn = Connection::open(paths.database()).unwrap();
-    conn.execute("INSERT INTO schema_migrations VALUES (9, 'future')", [])
+    conn.execute("INSERT INTO schema_migrations VALUES (12, 'future')", [])
         .unwrap();
     assert!(state::initialize(&paths, "test").is_err());
     assert!(state::status(&paths).is_err());
-    conn.execute("DELETE FROM schema_migrations WHERE version = 9", [])
+    conn.execute("DELETE FROM schema_migrations WHERE version = 12", [])
         .unwrap();
     conn.execute("UPDATE installation SET id = 'invalid'", [])
         .unwrap();
@@ -145,6 +145,9 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         include_str!("../migrations/0006_execution.sql"),
         include_str!("../migrations/0007_observability.sql"),
         include_str!("../migrations/0008_recovery.sql"),
+        include_str!("../migrations/0009_mysql.sql"),
+        include_str!("../migrations/0010_document_cursors.sql"),
+        include_str!("../migrations/0011_mongodb.sql"),
     ];
     for version in 1..=migrations.len() {
         let (_temp, paths) = setup();
@@ -177,7 +180,7 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
             conn.query_row("SELECT max(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            8
+            11
         );
         assert_eq!(
             conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

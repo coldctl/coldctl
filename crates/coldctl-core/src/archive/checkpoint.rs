@@ -1,3 +1,4 @@
+use crate::archive::key::ArchiveKey;
 use crate::{
     archive::manifest::ManifestObject, destination::StoredObject, error::Error, paths::StatePaths,
     state::archive as store,
@@ -38,7 +39,7 @@ fn scoped_lock(paths: &StatePaths, scope: &str, id: &str) -> Result<Connection, 
 pub(crate) struct Checkpoint {
     pub source_id: String,
     pub source_identity: String,
-    pub upper: Option<i64>,
+    pub upper: Option<ArchiveKey>,
     pub manifest: Option<StoredObject>,
 }
 #[derive(Serialize, Deserialize)]
@@ -47,7 +48,7 @@ pub(crate) struct Entry {
     pub staged_key: String,
 }
 pub(crate) fn load(paths: &StatePaths, id: &str) -> Result<Checkpoint, Error> {
-    let raw: Option<(String, String, Option<i64>, Option<String>)> = store::open(paths, false)?
+    let raw: Option<(String, String, Option<ArchiveKey>, Option<String>)> = store::open(paths, false)?
         .query_row(
             "SELECT source_id,source_identity,upper_key,manifest_json FROM archive_checkpoints WHERE job_id=?1",
             [id],

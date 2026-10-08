@@ -1,0 +1,19 @@
+[package]
+name = "coldctl-connector-mongodb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+coldctl-core.workspace = true
+coldctl-connector-protocol.workspace = true
+coldctl-connector-runtime = { path = "../coldctl-connector-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-std"] }
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "rustls-tls"] }
+sha2 = "0.10"
+futures-util = "0.3"
+tempfile = "3"
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+

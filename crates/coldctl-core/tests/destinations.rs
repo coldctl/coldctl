@@ -133,7 +133,7 @@ fn migration_from_v2_preserves_sources_and_installation() {
         conn.query_row("SELECT count(*) FROM schema_migrations", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        8
+        11
     );
 }
 

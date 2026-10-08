@@ -3,7 +3,7 @@ use crate::{
     error::Error,
     paths::StatePaths,
     policy::model::Policy,
-    source::postgres_archive::PostgresArchive,
+    source::ConnectorArchive,
     state::{archive as store, destinations, sources},
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,8 @@ pub struct SafetyContract {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivePlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_pin: Option<coldctl_connector_protocol::model::ConnectorPin>,
     pub policy: Policy,
     pub destination_path: PathBuf,
     pub cutoff_utc: String,
@@ -50,6 +52,6 @@ pub async fn plan(paths: &StatePaths, name: &str) -> Result<ArchivePlan, Error> 
     let policy = store::policy_show(paths, name)?;
     let source = sources::show(paths, &policy.source)?;
     let destination = destinations::show(paths, &policy.destination)?;
-    let reader = PostgresArchive::connect(source.connection).await?;
+    let reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
     reader.plan(policy, destination.path).await
 }

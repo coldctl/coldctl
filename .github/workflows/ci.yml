@@ -17,14 +17,26 @@ jobs:
     timeout-minutes: 35
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
       - run: cargo fmt --all -- --check
+      - run: cargo build --locked -p coldctl-connector-postgres -p coldctl-connector-mysql -p coldctl-connector-mongodb
+      - shell: bash
+        run: |
+          connector="$GITHUB_WORKSPACE/target/debug/coldctl-connector-postgres"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then connector="$connector.exe"; fi
+          echo "COLDCTL_POSTGRES_CONNECTOR=$connector" >> "$GITHUB_ENV"
+          echo "COLDCTL_SIGNED_TEST_BINARY=$connector" >> "$GITHUB_ENV"
+          echo "COLDCTL_SIGNED_TEST_MYSQL_BINARY=${connector/postgres/mysql}" >> "$GITHUB_ENV"
+          echo "COLDCTL_SIGNED_TEST_MONGODB_BINARY=${connector/postgres/mongodb}" >> "$GITHUB_ENV"
       - run: cargo test --workspace --locked
+      - run: cargo test -p coldctl-core native_connector_runs_with_a_package_lease --locked -- --ignored
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: python scripts/check_connector_dependencies.py
   postgres:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -40,6 +52,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
       COLDCTL_TEST_POSTGRES_URL: postgres://postgres:disposable_ci_password@localhost:5432/coldctl_test_source?sslmode=disable
       COLDCTL_TEST_RESTORE_URL: postgres://postgres:disposable_ci_password@localhost:5432/coldctl_test_restore?sslmode=disable
       COLDCTL_TEST_ROLE_PASSWORD: coldctl_test_role_password
@@ -50,12 +63,79 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
       - run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE coldctl_test_restore'
-      - run: cargo test --workspace --locked -- --ignored
+      - run: cargo build --locked -p coldctl-connector-postgres -p coldctl-connector-mysql -p coldctl-connector-mongodb
+      - run: echo "COLDCTL_POSTGRES_CONNECTOR=$GITHUB_WORKSPACE/target/debug/coldctl-connector-postgres" >> "$GITHUB_ENV"
+      - run: echo "COLDCTL_SIGNED_TEST_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-postgres" >> "$GITHUB_ENV"
+      - run: echo "COLDCTL_SIGNED_TEST_MYSQL_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mysql" >> "$GITHUB_ENV"
+      - run: echo "COLDCTL_SIGNED_TEST_MONGODB_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mongodb" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --exclude coldctl-connector-mysql --exclude coldctl-connector-mongodb --locked -- --ignored
+  mysql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: coldctl_disposable_mysql_phase4
+          MYSQL_DATABASE: coldctl_test_source
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 24
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
+      COLDCTL_TEST_MYSQL_URL: mysql://root:coldctl_disposable_mysql_phase4@localhost:3306/coldctl_test_source?sslmode=require
+      COLDCTL_TEST_MYSQL_RESTORE_URL: mysql://root:coldctl_disposable_mysql_phase4@localhost:3306/coldctl_test_restore?sslmode=require
+      COLDCTL_TEST_MYSQL_ROLE_PASSWORD: coldctl_mysql_role_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: docker exec -i ${{ job.services.mysql.id }} sh < scripts/mysql_test_tls.sh
+      - shell: bash
+        run: |
+          echo "COLDCTL_MYSQL_CONNECTOR=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mysql" >> "$GITHUB_ENV"
+          echo 'COLDCTL_TEST_MYSQL_CA<<COLDCTL_CA_END' >> "$GITHUB_ENV"
+          docker exec ${{ job.services.mysql.id }} cat /var/lib/mysql/phase4-ca.pem >> "$GITHUB_ENV"
+          echo 'COLDCTL_CA_END' >> "$GITHUB_ENV"
+      - run: cargo build --locked -p coldctl-connector-mysql
+      - run: cargo test -p coldctl-connector-mysql --locked -- --ignored
+  mongodb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
+      COLDCTL_TEST_MONGODB_PASSWORD: coldctl_mongodb_fixture_only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - shell: bash
+        run: |
+          docker run -d --name coldctl-mongo-ci -p 127.0.0.1:15443:27017 -v "$GITHUB_WORKSPACE/scripts:/fixture:ro" --entrypoint sh mongo:8.0 /fixture/mongodb_test_start.sh
+          for attempt in {1..60}; do
+            if docker exec coldctl-mongo-ci mongosh --quiet --eval 'db.runCommand({ping:1})'; then break; fi
+            sleep 1
+          done
+          docker exec coldctl-mongo-ci mongosh --quiet /fixture/mongodb_test_bootstrap.js
+          echo "COLDCTL_MONGODB_CONNECTOR=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mongodb" >> "$GITHUB_ENV"
+          echo 'COLDCTL_TEST_MONGODB_CA<<COLDCTL_CA_END' >> "$GITHUB_ENV"
+          docker exec coldctl-mongo-ci cat /tmp/ca.crt >> "$GITHUB_ENV"
+          echo 'COLDCTL_CA_END' >> "$GITHUB_ENV"
+      - run: cargo build --locked -p coldctl-connector-mongodb
+      - run: cargo test -p coldctl-connector-mongodb --locked -- --ignored
+      - if: always()
+        run: docker rm -f -v coldctl-mongo-ci
   audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
