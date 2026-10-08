@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 coldctl-connector-runtime = { path = "../coldctl-connector-runtime" }
 
 tempfile = "3"
-arrow-array = "56"
+arrow-array = "60"
 arrow-schema = "56"
 parquet = { version = "56", default-features = false, features = ["arrow", "snap"] }
 sha2 = "0.10"
