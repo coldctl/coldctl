@@ -10,7 +10,7 @@ homepage.workspace = true
 [dependencies]
 coldctl-connector-protocol.workspace = true
 directories = "6"
-rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
