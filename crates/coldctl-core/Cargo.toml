@@ -24,7 +24,7 @@ tempfile = "3"
 arrow-array = "56"
 arrow-schema = "56"
 parquet = { version = "56", default-features = false, features = ["arrow", "snap"] }
-sha2 = "0.10"
+sha2 = "0.11"
 fs2 = "0.4"
 
 tough = "0.24"
