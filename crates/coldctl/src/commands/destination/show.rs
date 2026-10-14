@@ -7,6 +7,11 @@ pub fn run(
     output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let destination = destinations::show(paths, name)?;
+    if let Some(config) = &destination.config {
+        if matches!(output, Output::Table) {
+            println!("Storage     {}", text(&serde_json::to_string(config)?));
+        }
+    }
     match output {
         Output::Json => println!("{}", serde_json::to_string_pretty(&destination)?),
         Output::Table => println!(

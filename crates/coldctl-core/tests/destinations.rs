@@ -18,6 +18,39 @@ fn setup() -> (tempfile::TempDir, StatePaths) {
 }
 
 #[test]
+fn s3_configuration_is_offline_and_persists_only_credential_names() {
+    use coldctl_core::destination::s3::S3Config;
+    let (temp, paths) = setup();
+    let root = temp.path().join("staging");
+    let saved = destinations::add_s3(
+        &paths,
+        "bucket",
+        &root,
+        S3Config {
+            bucket: "customer-archive".into(),
+            region: "us-east-1".into(),
+            prefix: "coldctl".into(),
+            endpoint: None,
+            access_key_env: "MISSING_ACCESS_KEY".into(),
+            secret_key_env: "MISSING_SECRET_KEY".into(),
+            session_token_env: None,
+            allow_http: false,
+        },
+    )
+    .unwrap();
+    assert!(!root.exists());
+    assert_eq!(saved.destination_type, "s3");
+    let loaded = destinations::show(&paths, "bucket").unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap(),
+        serde_json::to_value(&loaded).unwrap()
+    );
+    assert_eq!(destinations::list(&paths).unwrap().len(), 1);
+    destinations::remove(&paths, "bucket").unwrap();
+    assert!(!root.exists());
+}
+
+#[test]
 fn lifecycle_preserves_files_and_does_not_probe_during_configuration() {
     let (temp, paths) = setup();
     let root = temp.path().join("archive files");
@@ -118,7 +151,7 @@ fn migration_from_v2_preserves_sources_and_installation() {
     )
     .unwrap();
     let conn = rusqlite::Connection::open(paths.database()).unwrap();
-    conn.execute_batch("DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DROP TABLE destinations; DELETE FROM schema_migrations WHERE version >= 3;")
+    conn.execute_batch("DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DROP TABLE destinations; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version >= 3;")
         .unwrap();
     let error = destinations::list(&paths).unwrap_err();
     assert!(error.to_string().contains("coldctl init"));
@@ -133,7 +166,7 @@ fn migration_from_v2_preserves_sources_and_installation() {
         conn.query_row("SELECT count(*) FROM schema_migrations", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        11
+        16
     );
 }
 

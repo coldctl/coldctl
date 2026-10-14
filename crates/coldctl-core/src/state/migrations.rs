@@ -23,6 +23,11 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         [1, 2, 3, 4, 5, 6, 7, 8, 9] => Ok(9),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] => Ok(10),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] => Ok(11),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] => Ok(12),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] => Ok(13),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] => Ok(14),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] => Ok(15),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] => Ok(16),
         _ => Err(Error::InvalidState(
             "unsupported migration history; use a compatible Coldctl version".into(),
         )),
@@ -127,6 +132,51 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
             .map_err(sql_error)?;
         conn.execute(
             "INSERT INTO schema_migrations VALUES(11,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 11 {
+        conn.execute_batch(include_str!("../../migrations/0012_scheduler.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(12,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 12 {
+        conn.execute_batch(include_str!("../../migrations/0013_deletion.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(13,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 13 {
+        conn.execute_batch(include_str!("../../migrations/0014_sinks.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(14,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 14 {
+        conn.execute_batch(include_str!("../../migrations/0015_azure_sink.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(15,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 15 {
+        conn.execute_batch(include_str!("../../migrations/0016_recurring.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(16,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

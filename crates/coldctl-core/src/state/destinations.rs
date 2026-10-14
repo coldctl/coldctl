@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 fn open(paths: &StatePaths, writable: bool) -> Result<Connection, Error> {
     let conn = open_initialized(paths, writable)?;
-    if migrations::version(&conn).map_err(|e| at_path(e, paths))? < 3 {
+    if migrations::version(&conn).map_err(|e| at_path(e, paths))? < 15 {
         return Err(Error::InvalidState(
             "destination schema needs an upgrade; run `coldctl init`".into(),
         ));
@@ -27,24 +27,38 @@ fn decode(row: &Row<'_>) -> rusqlite::Result<Destination> {
         destination_type: row.get(2)?,
         path: PathBuf::from(row.get::<_, String>(3)?),
         created_at: row.get(4)?,
+        config: row
+            .get::<_, Option<String>>(5)?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
     })
 }
 
 fn validate(destination: Destination) -> Result<Destination, Error> {
     validate_name(&destination.name)?;
-    if destination.destination_type != "local" || !destination.path.is_absolute() {
+    if !destination.path.is_absolute() {
         return Err(Error::InvalidState(
             "invalid local destination configuration".into(),
         ));
     }
     resolve_path(&destination.path)?;
+    match (&destination.config, destination.destination_type.as_str()) {
+        (None, "local") => (),
+        (Some(config), kind) if kind == config.kind() => config.validate()?,
+        _ => {
+            return Err(Error::DestinationConfiguration(
+                "invalid destination type/configuration",
+            ));
+        }
+    }
     Ok(destination)
 }
 
 fn get(conn: &Connection, name: &str) -> Result<Destination, Error> {
     let destination = conn
         .query_row(
-            "SELECT id, name, destination_type, path, created_at FROM destinations WHERE name = ?1",
+            "SELECT id, name, destination_type, path, created_at, config_json FROM destinations WHERE name = ?1",
             [name],
             decode,
         )
@@ -72,7 +86,7 @@ pub fn add_local(paths: &StatePaths, name: &str, path: &Path) -> Result<Destinat
 pub fn list(paths: &StatePaths) -> Result<Vec<Destination>, Error> {
     let conn = open(paths, false)?;
     (|| {
-        let mut statement = conn.prepare("SELECT id, name, destination_type, path, created_at FROM destinations ORDER BY name").map_err(sql_error)?;
+        let mut statement = conn.prepare("SELECT id, name, destination_type, path, created_at, config_json FROM destinations ORDER BY name").map_err(sql_error)?;
         statement.query_map([], decode).map_err(sql_error)?
             .map(|row| validate(row.map_err(sql_error)?)).collect::<Result<Vec<_>, Error>>()
     })().map_err(|e| at_path(e, paths))
@@ -94,4 +108,32 @@ pub fn remove(paths: &StatePaths, name: &str) -> Result<(), Error> {
         return Err(Error::DestinationNotFound);
     }
     Ok(())
+}
+
+/// Persist only credential references, never resolved secrets.
+pub fn add_s3(
+    paths: &StatePaths,
+    name: &str,
+    staging: &Path,
+    config: crate::destination::s3::S3Config,
+) -> Result<Destination, Error> {
+    add_remote(paths, name, staging, config.into())
+}
+
+/// Persist provider configuration, with credential references only.
+pub fn add_remote(
+    paths: &StatePaths,
+    name: &str,
+    staging: &Path,
+    config: crate::destination::DestinationConfig,
+) -> Result<Destination, Error> {
+    validate_name(name)?;
+    config.validate()?;
+    let staging = resolve_path(staging)?;
+    let conn = open(paths, true)?;
+    let changed = conn.execute("INSERT INTO destinations (id,name,destination_type,path,created_at,config_json) VALUES (?1,?2,?5,?3,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?4) ON CONFLICT(name) DO NOTHING", (uuid::Uuid::new_v4().to_string(), name, staging.to_str().ok_or(Error::DestinationConfiguration("invalid staging path"))?, serde_json::to_string(&config).map_err(|_| Error::DestinationConfiguration("invalid configuration"))?, config.kind())).map_err(sql_error)?;
+    if changed == 0 {
+        return Err(Error::DestinationExists);
+    }
+    get(&conn, name)
 }

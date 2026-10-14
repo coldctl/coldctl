@@ -23,7 +23,7 @@ pub(crate) fn policy_lock(paths: &StatePaths, id: &str) -> Result<Connection, Er
     scoped_lock(paths, "policy-locks", id)
 }
 
-fn scoped_lock(paths: &StatePaths, scope: &str, id: &str) -> Result<Connection, Error> {
+pub(crate) fn scoped_lock(paths: &StatePaths, scope: &str, id: &str) -> Result<Connection, Error> {
     let directory = paths.data_dir.join(scope);
     crate::fs_security::create_dir(&directory)?;
     let database = directory.join(format!("{id}.db"));
@@ -140,6 +140,13 @@ pub(crate) fn manifest(paths: &StatePaths, id: &str, object: &StoredObject) -> R
 pub(crate) fn restart(paths: &StatePaths, id: &str) -> Result<(), Error> {
     store::open(paths,true)?.execute("UPDATE jobs SET status='running',completed_at=NULL,error=NULL,failure_json=NULL,progress_json=NULL,cancel_requested=0,verified_at=NULL WHERE id=?1 AND status!='completed'",[id]).map_err(db_error)?;
     Ok(())
+}
+
+/// Automatic resume must never clear a concurrent operator cancellation.
+pub(crate) fn restart_uncancelled(paths: &StatePaths, id: &str) -> Result<bool, Error> {
+    let conn = store::open(paths, true)?;
+    let changed = conn.execute("UPDATE jobs SET status='running',completed_at=NULL,error=NULL,failure_json=NULL,progress_json=NULL,verified_at=NULL WHERE id=?1 AND status NOT IN ('completed','cancelled') AND cancel_requested=0", [id]).map_err(db_error)?;
+    Ok(changed == 1)
 }
 pub(crate) fn cancelled(paths: &StatePaths, id: &str) -> Result<bool, Error> {
     let conn = store::open(paths, true)?;

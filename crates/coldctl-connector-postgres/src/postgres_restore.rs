@@ -411,7 +411,7 @@ async fn check_schema(
     Ok(())
 }
 
-fn same(kind: &str, expected: &Option<String>, actual: &Option<String>) -> bool {
+pub(crate) fn same(kind: &str, expected: &Option<String>, actual: &Option<String>) -> bool {
     match (expected, actual) {
         (None, None) => true,
         (Some(a), Some(b)) if kind == "float4" => match (a.parse::<f32>(), b.parse::<f32>()) {

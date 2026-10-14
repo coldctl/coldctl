@@ -13,6 +13,131 @@ fn run(path: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn azure_cli_configuration_and_show_are_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    assert!(run(&state, &["init"]).status.success());
+    let added = run(
+        &state,
+        &[
+            "destination",
+            "add",
+            "azure",
+            "--name",
+            "azure-test",
+            "--account",
+            "customeraccount",
+            "--container",
+            "archive",
+            "--account-key-env",
+            "COLDCTL_MISSING_AZURE_KEY",
+            "--output",
+            "json",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(saved["destination_type"], "azure");
+    assert_eq!(
+        saved["config"]["account_key_env"],
+        "COLDCTL_MISSING_AZURE_KEY"
+    );
+    assert!(!state.join("staging").exists());
+    let shown = run(
+        &state,
+        &["destination", "show", "azure-test", "--output", "json"],
+    );
+    assert!(shown.status.success());
+    assert_eq!(
+        saved,
+        serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap()
+    );
+    let checked = run(&state, &["destination", "test", "azure-test"]);
+    assert!(!checked.status.success());
+    assert!(String::from_utf8_lossy(&checked.stderr).contains("environment variable"));
+    assert!(
+        run(&state, &["destination", "remove", "azure-test"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn s3_cli_configuration_and_show_are_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    assert!(run(&state, &["init"]).status.success());
+    let added = run(
+        &state,
+        &[
+            "destination",
+            "add",
+            "s3",
+            "--name",
+            "remote",
+            "--bucket",
+            "customer-archive",
+            "--region",
+            "us-east-1",
+            "--access-key-env",
+            "COLDCTL_MISSING_S3_ACCESS",
+            "--secret-key-env",
+            "COLDCTL_MISSING_S3_SECRET",
+            "--output",
+            "json",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(saved["destination_type"], "s3");
+    assert_eq!(saved["config"]["bucket"], "customer-archive");
+    assert!(!state.join("staging").exists());
+    let shown = run(
+        &state,
+        &["destination", "show", "remote", "--output", "json"],
+    );
+    assert!(shown.status.success());
+    assert_eq!(
+        saved,
+        serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap()
+    );
+    assert!(
+        !run(
+            &state,
+            &[
+                "destination",
+                "add",
+                "s3",
+                "--name",
+                "unsafe",
+                "--bucket",
+                "customer-archive",
+                "--region",
+                "us-east-1",
+                "--endpoint",
+                "http://example.com",
+                "--allow-http"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(&state, &["destination", "remove", "remote"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn destination_cli_lifecycle_with_json_and_spaces_in_path() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");

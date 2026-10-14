@@ -1,0 +1,6 @@
+services:
+  s3:
+    image: motoserver/moto:5.1.14@sha256:800719627036dc38dc699e9f314f624f2c98ac3d8bb754db078cb2698f08ee77
+    ports:
+      - "127.0.0.1:19000:5000"
+    # Deliberately ephemeral; this emulator is only for disposable fixture archives.

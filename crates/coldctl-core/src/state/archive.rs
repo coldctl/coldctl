@@ -224,6 +224,7 @@ pub fn job_list(paths: &StatePaths) -> Result<Vec<Job>, Error> {
         .map(|row| row.map_err(|e| at_path(sql_error(e), paths)))
         .collect()
 }
+#[cfg(test)]
 pub(crate) fn job_create(
     paths: &StatePaths,
     plan: &ArchivePlan,
@@ -231,6 +232,18 @@ pub(crate) fn job_create(
     identity: &str,
     upper: Option<ArchiveKey>,
     controls: &crate::archive::controls::ExecutionControls,
+) -> Result<Job, Error> {
+    job_create_queued(paths, plan, source_id, identity, upper, controls, None)
+}
+
+pub(crate) fn job_create_queued(
+    paths: &StatePaths,
+    plan: &ArchivePlan,
+    source_id: &str,
+    identity: &str,
+    upper: Option<ArchiveKey>,
+    controls: &crate::archive::controls::ExecutionControls,
+    queue_id: Option<&str>,
 ) -> Result<Job, Error> {
     if upper.is_some_and(|key| {
         !key.matches_engine(
@@ -266,6 +279,17 @@ pub(crate) fn job_create(
         (&id, execution),
     )
     .map_err(|e| at_path(sql_error(e), paths))?;
+    if let Some(queue_id) = queue_id {
+        let changed = tx.execute(
+            "UPDATE archive_queue SET job_id=?2 WHERE id=?1 AND job_id IS NULL AND status='running' AND policy_id=?3",
+            (queue_id, &id, &plan.policy.id),
+        ).map_err(|e| at_path(sql_error(e), paths))?;
+        if changed != 1 {
+            return Err(Error::Archive(
+                "queue entry cancelled or already assigned; job creation rolled back",
+            ));
+        }
+    }
     tx.commit().map_err(|e| at_path(sql_error(e), paths))?;
     job_show(paths, &id)
 }

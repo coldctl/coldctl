@@ -2,7 +2,6 @@
 use super::connector::{Request, RestoreProgress, RestoreSpec, launch_in_state};
 use crate::{
     archive::{checkpoint, controls::Shutdown, verifier},
-    destination::{ArchiveDestination, local::LocalDestination},
     error::Error,
     paths::StatePaths,
     state::{archive as store, sources},
@@ -215,15 +214,35 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<Repor
     }
 }
 type Values = Vec<Option<String>>;
-fn read_batch(paths: &StatePaths, job: &store::Job, sequence: i64) -> Result<Vec<Values>, Error> {
+pub(crate) fn read_batch(
+    paths: &StatePaths,
+    job: &store::Job,
+    sequence: i64,
+) -> Result<Vec<Values>, Error> {
     let (entry, committed) = checkpoint::entry(paths, &job.id, sequence)?.ok_or_else(bad)?;
     if !committed {
         return Err(bad());
     }
-    let destination = LocalDestination::new(job.storage_root.clone())?;
-    destination.verify(&entry.batch.object)?;
-    let file = std::fs::File::open(destination.object_path(&entry.batch.object.key)?)
+    let destination = crate::destination::for_job(job)?;
+    // Decode exactly the bytes whose digest was checked. In particular deletion
+    // must not verify one file and then consume a replacement at the same path.
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    if entry.batch.object.bytes > 128 * 1024 * 1024 {
+        return Err(bad());
+    }
+    let mut data = Vec::new();
+    destination
+        .read_verified(&entry.batch.object)?
+        .take(entry.batch.object.bytes + 1)
+        .read_to_end(&mut data)
         .map_err(|_| bad())?;
+    if data.len() as u64 != entry.batch.object.bytes
+        || format!("{:x}", Sha256::digest(&data)) != entry.batch.object.sha256
+    {
+        return Err(bad());
+    }
+    let file = bytes::Bytes::from(data);
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|_| bad())?
         .with_batch_size(1000)

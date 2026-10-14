@@ -3,6 +3,8 @@ use coldctl_core::paths::StatePaths;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Queue and execute long-running archives with durable checkpoint recovery.
+    Scheduler(super::scheduler::SchedulerArgs),
     /// Explicitly upload allowlisted lifecycle metadata to your Cloud workspace.
     Sync {
         /// Cloud origin, for example https://your-console.example.com.
@@ -21,6 +23,7 @@ pub enum Command {
 }
 pub async fn run(command: Command, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Scheduler(args) => super::scheduler::run(args, paths).await,
         Command::Sync {
             cloud_url,
             token_env,

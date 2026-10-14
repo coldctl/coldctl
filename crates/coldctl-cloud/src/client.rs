@@ -216,6 +216,37 @@ mod tests {
         .unwrap();
         state::destinations::add_local(&paths, "archive", &dir.path().join("PRIVATE_PATH"))
             .unwrap();
+        state::destinations::add_s3(
+            &paths,
+            "remote",
+            &dir.path().join("PRIVATE_STAGING"),
+            coldctl_core::destination::s3::S3Config {
+                bucket: "private-bucket".into(),
+                region: "us-east-1".into(),
+                prefix: "PRIVATE_PREFIX".into(),
+                endpoint: Some("https://private-endpoint.example".into()),
+                access_key_env: "PRIVATE_ACCESS_ENV".into(),
+                secret_key_env: "PRIVATE_SECRET_ENV".into(),
+                session_token_env: None,
+                allow_http: false,
+            },
+        )
+        .unwrap();
+        state::destinations::add_remote(
+            &paths,
+            "azure-remote",
+            &dir.path().join("PRIVATE_AZURE_STAGING"),
+            coldctl_core::destination::azure::AzureConfig {
+                account: "privateazureaccount".into(),
+                container: "private-container".into(),
+                prefix: "PRIVATE_AZURE_PREFIX".into(),
+                endpoint: Some("https://private-azure.example".into()),
+                account_key_env: "PRIVATE_AZURE_KEY_ENV".into(),
+                allow_http: false,
+            }
+            .into(),
+        )
+        .unwrap();
         state::archive::policy_create(
             &paths,
             "policy",
@@ -234,7 +265,19 @@ mod tests {
         .unwrap();
         let report = String::from_utf8(encode(&collect(&paths, "test").unwrap()).unwrap()).unwrap();
         for secret in [
+            "privateazureaccount",
+            "private-container",
+            "PRIVATE_AZURE_PREFIX",
+            "private-azure",
+            "PRIVATE_AZURE_KEY_ENV",
+            "PRIVATE_AZURE_STAGING",
             "SECRET_URL_ENV",
+            "private-bucket",
+            "PRIVATE_STAGING",
+            "PRIVATE_PREFIX",
+            "private-endpoint",
+            "PRIVATE_ACCESS_ENV",
+            "PRIVATE_SECRET_ENV",
             "PRIVATE_PATH",
             "PRIVATE_LITERAL",
             "password",

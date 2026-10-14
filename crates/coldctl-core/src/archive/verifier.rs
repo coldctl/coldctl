@@ -3,10 +3,7 @@ use super::{
     progress::{Observer, Reporter, Stage},
 };
 use crate::{
-    destination::{
-        ArchiveDestination,
-        local::{LocalDestination, fingerprint},
-    },
+    destination::local::{LocalDestination, fingerprint},
     error::Error,
     paths::StatePaths,
     state::archive as store,
@@ -77,10 +74,13 @@ fn verify_contents(paths: &StatePaths, id: &str) -> Result<Verification, Error> 
     let manifest = checkpoint
         .manifest
         .ok_or(Error::Archive("missing manifest checkpoint"))?;
-    let destination = LocalDestination::new(job.storage_root.clone())?;
+    let destination = crate::destination::for_job(&job)?;
     if job.imported {
         super::recovery::regular(&job.storage_root.join(id), true)?;
-        super::recovery::regular(&destination.object_path(&manifest.key)?, false)?;
+        super::recovery::regular(
+            &LocalDestination::new(job.storage_root.clone())?.object_path(&manifest.key)?,
+            false,
+        )?;
     }
     destination.verify(&manifest)?;
     let expected = executor::manifest_file(paths, id, &job.plan, checkpoint.upper)?;
@@ -109,7 +109,7 @@ fn verify_contents(paths: &StatePaths, id: &str) -> Result<Verification, Error> 
 
 pub(crate) fn verify_batches(paths: &StatePaths, job: &store::Job) -> Result<(), Error> {
     let checkpoint = journal::load(paths, &job.id)?;
-    let destination = LocalDestination::new(job.storage_root.clone())?;
+    let destination = crate::destination::for_job(job)?;
     let key_index = job
         .plan
         .columns
@@ -130,11 +130,13 @@ pub(crate) fn verify_batches(paths: &StatePaths, job: &store::Job) -> Result<(),
             return Err(Error::Archive("invalid batch checkpoint"));
         }
         if job.imported {
-            super::recovery::regular(&destination.object_path(&entry.batch.object.key)?, false)?;
+            super::recovery::regular(
+                &LocalDestination::new(job.storage_root.clone())?
+                    .object_path(&entry.batch.object.key)?,
+                false,
+            )?;
         }
-        destination.verify(&entry.batch.object)?;
-        let file = std::fs::File::open(destination.object_path(&entry.batch.object.key)?)
-            .map_err(invalid)?;
+        let file = destination.read_verified(&entry.batch.object)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(invalid)?;
         if builder.schema().fields().len() != job.plan.columns.len() {
             return Err(invalid(()));

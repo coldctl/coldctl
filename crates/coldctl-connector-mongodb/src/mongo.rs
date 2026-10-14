@@ -269,7 +269,7 @@ impl Mongo {
         }
         Ok(())
     }
-    fn check_plan(&self, plan: &ArchivePlan) -> Result<(), Error> {
+    pub(crate) fn check_plan(&self, plan: &ArchivePlan) -> Result<(), Error> {
         plan.policy.config.validate()?;
         collection_name(&plan.policy.config.table)?;
         let field = &plan.policy.config.time_column;
@@ -299,7 +299,7 @@ impl Mongo {
         )
         .try_to_rfc3339_string()
         .map_err(|_| bad())?;
-        let plan = ArchivePlan {connector_pin: None, policy, destination_path, cutoff_utc: cutoff, primary_key: "_id".into(), table_oid: 0, columns: codec::columns(), estimated_rows: None, delete: false, safety: None, warnings: vec![
+        let plan = ArchivePlan {destination_config:None,connector_pin: None, policy, destination_path, cutoff_utc: cutoff, primary_key: "_id".into(), table_oid: 0, columns: codec::columns(), estimated_rows: None, delete: false, safety: None, warnings: vec![
             "MongoDB 8.0 primary replica set; ordinary nonsharded collections, ObjectId keys and top-level Date retention only. Equality filters are unsupported.".into(),
             "Preflight and resume scan the entire collection to validate key/Date types and BSON sizes. Each operation has a source query deadline; budget this load before large runs.".into(),
             "Documents are preserved as raw BSON; 30 KiB document limit. Discovery samples one document and cannot establish collection-wide types.".into(),
@@ -316,7 +316,7 @@ impl Mongo {
         self.plan = Some(plan.clone());
         Ok(())
     }
-    async fn check_identity(&self, plan: &ArchivePlan) -> Result<(), Error> {
+    pub(crate) async fn check_identity(&self, plan: &ArchivePlan) -> Result<(), Error> {
         if plan.safety.as_ref().is_some_and(|s| {
             !matches!(
                 s.source_stability,

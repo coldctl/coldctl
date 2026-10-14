@@ -37,7 +37,7 @@ fn policy_lifecycle_pins_references_and_migration_preserves_existing_state() {
     destinations::add_local(&paths, "disk", &temp.path().join("archives")).unwrap();
     let conn = rusqlite::Connection::open(paths.database()).unwrap();
     conn.execute_batch(
-        "DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DELETE FROM schema_migrations WHERE version>=4;",
+        "DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=4;",
     )
     .unwrap();
     assert!(store::policy_list(&paths).is_err());

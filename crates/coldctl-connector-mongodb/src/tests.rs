@@ -14,6 +14,162 @@ use coldctl_core::{
 use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, DateTime, Decimal128, RawDocumentBuf, doc, oid::ObjectId};
 
+#[tokio::test]
+#[ignore = "requires disposable MongoDB 8.0 replica set, deletion_writer and built connector"]
+async fn mongodb_verified_deletion_rollback_replay_and_resume() {
+    use coldctl_core::{archive::deletion, format::bson as codec, source::connector::DeleteSpec};
+    let resolved = config("coldctl_mongo_source", "deletion_writer");
+    let native = mongo::Mongo::connect(resolved.clone()).await.unwrap();
+    let name = format!("delete_{}", uuid::Uuid::new_v4().simple());
+    let target = native.db.collection::<mongodb::bson::Document>(&name);
+    let docs=(1..=3).map(|n|doc!{"_id":ObjectId::from_bytes([n;12]),"created_at":DateTime::from_millis(0),"value":Bson::Int64(1),"note":"original"}).collect::<Vec<_>>();
+    target.insert_many(docs.clone()).await.unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
+    state::initialize(&paths, "test").unwrap();
+    sources::add(
+        &paths,
+        "source",
+        connection("coldctl_mongo_source", "deletion_writer"),
+    )
+    .unwrap();
+    destinations::add_local(&paths, "disk", &temp.path().join("archives")).unwrap();
+    store::policy_create(
+        &paths,
+        "events",
+        "source",
+        "disk",
+        PolicyConfig {
+            schema: "coldctl_mongo_source".into(),
+            table: name.clone(),
+            time_column: "created_at".into(),
+            older_than_days: 365,
+            batch_size: 2,
+            equals_column: None,
+            equals_value: None,
+        },
+    )
+    .unwrap();
+    let job = executor::run(&paths, "events", run_options(None))
+        .await
+        .unwrap();
+    let options = |max_batches| deletion::Options {
+        confirm_delete: true,
+        confirm_original_source: true,
+        max_batches,
+        shutdown: Default::default(),
+    };
+    let second = doc! {"_id":ObjectId::from_bytes([2;12])};
+    // Numerically equal but different BSON type is a changed document.
+    target
+        .update_one(second.clone(), doc! {"$set":{"value":Bson::Int32(1)}})
+        .await
+        .unwrap();
+    assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 3);
+    target
+        .update_one(
+            second.clone(),
+            doc! {"$set":{"value":Bson::Int64(1),"note":"x".repeat(32000)}},
+        )
+        .await
+        .unwrap();
+    assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 3);
+    target.replace_one(second, docs[1].clone()).await.unwrap();
+    let rows = docs[..2]
+        .iter()
+        .map(|d| codec::encode(&mongodb::bson::to_vec(d).unwrap(), "created_at").unwrap())
+        .collect::<Vec<_>>();
+    let mut direct = crate::deletion::DeleteSession::open(
+        resolved.clone(),
+        DeleteSpec {
+            plan: job.plan.clone(),
+            source_identity: native.identity().into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(direct.batch(&rows).await.unwrap().deleted, 2);
+    drop(direct);
+    let paused = deletion::run(&paths, &job.id, options(Some(1)))
+        .await
+        .unwrap();
+    assert_eq!(paused.rows_absent, 2);
+    assert!(!paused.completed);
+    let done = deletion::run(&paths, &job.id, options(None)).await.unwrap();
+    assert!(done.completed);
+    assert_eq!(done.rows_deleted, 1);
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 0);
+    // Completion is terminal even if keys are reused later.
+    target.insert_many(docs.clone()).await.unwrap();
+    assert!(
+        deletion::run(&paths, &job.id, options(None))
+            .await
+            .unwrap()
+            .completed
+    );
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 3);
+    use coldctl_core::{scheduler::Worker, state::scheduler as queue};
+    queue::enqueue(
+        &paths,
+        "events",
+        None,
+        queue::Options {
+            delete_after_archive: true,
+            source_stability: SourceStability::QuiescentCopy,
+            allow_repeat: true,
+            confirm_original_source: true,
+            max_retries: 0,
+            execution: ExecutionControls {
+                max_duration_seconds: Some(60),
+                minimum_free_bytes: 1,
+                ..Default::default()
+            },
+        },
+        0,
+    )
+    .unwrap();
+    let worker = Worker::acquire(&paths).unwrap();
+    assert_eq!(
+        worker
+            .tick(Shutdown::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 1);
+    drop(worker);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let worker = Worker::acquire(&paths).unwrap();
+    assert_eq!(
+        worker
+            .tick(Shutdown::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 0);
+    let mut stale = crate::deletion::DeleteSession::open(
+        resolved,
+        DeleteSpec {
+            plan: job.plan.clone(),
+            source_identity: native.identity().into(),
+        },
+    )
+    .await
+    .unwrap();
+    target.drop().await.unwrap();
+    target.insert_many(docs).await.unwrap();
+    assert!(stale.batch(&rows).await.is_err());
+    assert_eq!(target.count_documents(doc! {}).await.unwrap(), 3);
+    target.drop().await.unwrap();
+}
+
 fn config(database: &str, user: &str) -> ResolvedConnection {
     ResolvedConnection {
         host: "localhost".into(),

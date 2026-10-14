@@ -49,14 +49,13 @@ def main():
         folder = Path(tmp) / name
         folder.mkdir()
         shutil.copy2(binary, folder / binary_name)
-        for path in ["LICENSE", "README.md", "Cargo.lock", "PRODUCTION_RELEASE_CHECKLIST.md", "CONNECTOR_RUNTIME.md", "CONNECTOR_INSTALLATION.md", "MYSQL_CONNECTOR.md", "MONGODB_PHASE5.md"]:
+        for path in ["LICENSE", "README.md", "Cargo.lock", "RELEASING.md", "SINKS.md"]:
             shutil.copy2(ROOT / path, folder / path)
-        shutil.copytree(ROOT / "docs", folder / "docs")
         info = {"component": args.component, "version": version, "target": args.target, "commit": run("git", "rev-parse", "HEAD"),
                 "dirty": dirty, "rustc": run("rustc", "--version"), "cargo": run("cargo", "--version"),
                 "lockfile_sha256": hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest(),
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 11, "manifest_formats": [2,3,4]}
+                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 16, "manifest_formats": [2,3,4]}
         (folder / "BUILD-INFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
         if extension == ".zip":
             with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as z:

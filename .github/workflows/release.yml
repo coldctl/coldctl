@@ -5,8 +5,27 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: coldctl-release
+  cancel-in-progress: false
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate version tag and signing bootstrap
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          test "$REF_TYPE" = tag
+          test -f release/root.json
+          python scripts/release.py validate --tag "$RELEASE_TAG"
+      - run: python scripts/test_release.py
   checks:
+    needs: validate
     uses: ./.github/workflows/ci.yml
   package:
     needs: checks
@@ -19,7 +38,7 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
@@ -62,3 +81,41 @@ jobs:
           path: target/packages/*
           if-no-files-found: error
           retention-days: 30
+  publish:
+    needs: [validate, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-input
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Retrieve the previous stable registry
+        run: python scripts/release.py previous --tag "$RELEASE_TAG" --out target/previous-release
+      - name: Verify history, sign the registry and assemble downloads
+        env:
+          COLDCTL_TUF_ONLINE_KEY: ${{ secrets.COLDCTL_TUF_ONLINE_KEY }}
+        shell: bash
+        run: |
+          previous=()
+          if [[ -f target/previous-release/connector-registry.zip ]]; then
+            previous=(--previous target/previous-release/connector-registry.zip)
+          fi
+          python scripts/release.py prepare --tag "$RELEASE_TAG" --artifacts target/release-input --out target/release-assets "${previous[@]}"
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: target/release-assets/SHA256SUMS
+      - name: Publish only after every asset is uploaded
+        run: python scripts/release.py publish --tag "$RELEASE_TAG" --out target/release-assets --notes target/release-notes.md

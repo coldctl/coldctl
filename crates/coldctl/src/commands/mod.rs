@@ -8,6 +8,7 @@ pub mod destination;
 pub mod init;
 pub mod jobs;
 pub mod policy;
+pub mod scheduler;
 pub mod source;
 pub mod state;
 pub mod status;

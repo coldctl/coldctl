@@ -89,12 +89,18 @@ fn newer_schema_and_invalid_identity_are_rejected() {
     let (_temp, paths) = setup();
     state::initialize(&paths, "test").unwrap();
     let conn = Connection::open(paths.database()).unwrap();
-    conn.execute("INSERT INTO schema_migrations VALUES (12, 'future')", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO schema_migrations SELECT max(version)+1, 'future' FROM schema_migrations",
+        [],
+    )
+    .unwrap();
     assert!(state::initialize(&paths, "test").is_err());
     assert!(state::status(&paths).is_err());
-    conn.execute("DELETE FROM schema_migrations WHERE version = 12", [])
-        .unwrap();
+    conn.execute(
+        "DELETE FROM schema_migrations WHERE applied_at = 'future'",
+        [],
+    )
+    .unwrap();
     conn.execute("UPDATE installation SET id = 'invalid'", [])
         .unwrap();
     assert!(state::initialize(&paths, "test").is_err());
@@ -148,6 +154,11 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         include_str!("../migrations/0009_mysql.sql"),
         include_str!("../migrations/0010_document_cursors.sql"),
         include_str!("../migrations/0011_mongodb.sql"),
+        include_str!("../migrations/0012_scheduler.sql"),
+        include_str!("../migrations/0013_deletion.sql"),
+        include_str!("../migrations/0014_sinks.sql"),
+        include_str!("../migrations/0015_azure_sink.sql"),
+        include_str!("../migrations/0016_recurring.sql"),
     ];
     for version in 1..=migrations.len() {
         let (_temp, paths) = setup();
@@ -165,6 +176,17 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
             )
             .unwrap();
         }
+        if version >= 4 {
+            conn.execute_batch("INSERT INTO sources VALUES ('migration-source','migration-source','postgres','{}','original');
+                INSERT INTO destinations (id,name,destination_type,path,created_at) VALUES ('migration-destination','migration-destination','local','original-path','original');
+                INSERT INTO policies VALUES ('migration-policy','migration-policy','migration-source','migration-destination','{}','original');").unwrap();
+        }
+        if version >= 12 {
+            conn.execute("INSERT INTO archive_queue(id,policy_id,policy_name,options_json,status,due_at,failures) VALUES('migration-queue','migration-policy','migration-policy','{}','pending',123,2)", []).unwrap();
+        }
+        if version >= 14 {
+            conn.execute("INSERT INTO destinations(id,name,destination_type,path,created_at,config_json) VALUES('s3-preserved','s3-preserved','s3','staging','original',?1)", [r#"{"kind":"s3","bucket":"keep-me","region":"us-east-1","prefix":"archive","endpoint":null,"access_key_env":"KEY","secret_key_env":"SECRET","session_token_env":null,"allow_http":false}"#]).unwrap();
+        }
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO installation VALUES (?1,'2026-01-01T00:00:00Z','old')",
@@ -176,11 +198,46 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         assert!(!upgraded.created);
         assert_eq!(upgraded.installation.id.to_string(), id);
         let conn = Connection::open(paths.database()).unwrap();
+        if version >= 4 {
+            assert_eq!(conn.query_row("SELECT path FROM destinations d JOIN policies p ON p.destination_id=d.id WHERE p.id='migration-policy'", [], |r| r.get::<_, String>(0)).unwrap(), "original-path");
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+        }
+        if version >= 12 {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT failures FROM archive_queue WHERE id='migration-queue'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+        }
+        if version >= 14 {
+            let config: String = conn
+                .query_row(
+                    "SELECT config_json FROM destinations WHERE id='s3-preserved'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&config).unwrap()["bucket"],
+                "keep-me"
+            );
+        }
         assert_eq!(
             conn.query_row("SELECT max(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            11
+            16
         );
         assert_eq!(
             conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

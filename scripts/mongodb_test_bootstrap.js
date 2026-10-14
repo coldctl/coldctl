@@ -1,6 +1,14 @@
 // Dedicated disposable fixture; never run against a customer deployment.
-rs.initiate({_id: "coldctlPhase5", members: [{_id: 0, host: "localhost:27017"}]});
-assert.soon(() => db.hello().isWritablePrimary, "replica set primary", 60000);
+try {
+    rs.initiate({_id: "coldctlPhase5", members: [{_id: 0, host: "localhost:27017"}]});
+} catch (error) {
+    if (error.code !== 23) throw error; // Permit recovery after initialization only.
+}
+const deadline = Date.now() + 60000;
+while (!db.hello().isWritablePrimary) {
+    if (Date.now() >= deadline) throw new Error("replica set did not become primary");
+    sleep(250);
+}
 const password = "coldctl_mongodb_fixture_only";
 db.getSiblingDB("admin").createUser({user: "fixture_admin", pwd: password, roles: ["root"]});
 db.getSiblingDB("admin").auth("fixture_admin", password);

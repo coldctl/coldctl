@@ -5,6 +5,7 @@ pub mod error;
 pub mod format;
 pub mod paths;
 pub mod policy;
+pub mod scheduler;
 pub mod source;
 pub mod state;
 

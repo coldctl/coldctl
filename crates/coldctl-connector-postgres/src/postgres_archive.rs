@@ -58,7 +58,7 @@ pub(crate) fn supported(kind: &str) -> bool {
     )
 }
 
-async fn inspect(
+pub(crate) async fn inspect(
     client: &impl GenericClient,
     policy: &Policy,
 ) -> Result<(u32, String, Vec<ArchiveColumn>), Error> {
@@ -231,7 +231,7 @@ impl PostgresArchive {
             .await
             .map_err(|e| postgres_error("determine cutoff", e))?
             .get(0);
-        let mut plan=ArchivePlan{connector_pin:None,safety:None,policy,destination_path,cutoff_utc,primary_key,columns,table_oid,estimated_rows:None,delete:false,warnings:vec!["Export uses per-batch snapshots; archive immutable cold rows. Concurrent changes can alter eligibility or values.".into(),"Numeric/date/timestamp/UUID/JSON columns are stored losslessly as UTF-8 text with PostgreSQL type metadata.".into(),"Rows larger than 64 KiB in JSON text-array form fail rather than being truncated.".into()]};
+        let mut plan=ArchivePlan{destination_config:None,connector_pin:None,safety:None,policy,destination_path,cutoff_utc,primary_key,columns,table_oid,estimated_rows:None,delete:false,warnings:vec!["Export uses per-batch snapshots; archive immutable cold rows. Concurrent changes can alter eligibility or values.".into(),"Numeric/date/timestamp/UUID/JSON columns are stored losslessly as UTF-8 text with PostgreSQL type metadata.".into(),"Rows larger than 64 KiB in JSON text-array form fail rather than being truncated.".into()]};
         let sql = format!(
             "EXPLAIN (FORMAT JSON) SELECT * FROM {} WHERE {}",
             relation(&plan.policy),
@@ -410,7 +410,10 @@ async fn schema_signature(client: &impl GenericClient, oid: u32) -> Result<Strin
     let definition: String = row.get(0);
     Ok(format!("{:x}", Sha256::digest(definition.as_bytes())))
 }
-async fn validate_signature(client: &impl GenericClient, plan: &ArchivePlan) -> Result<(), Error> {
+pub(crate) async fn validate_signature(
+    client: &impl GenericClient,
+    plan: &ArchivePlan,
+) -> Result<(), Error> {
     if let Some(safety) = &plan.safety {
         if schema_signature(client, plan.table_oid).await?
             != safety.source_identity.schema_signature

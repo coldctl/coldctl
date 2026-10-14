@@ -5,7 +5,7 @@ and retrieve historical data while keeping storage and execution on your infrast
 
 ColdCTL is designed to support multiple database engines and storage destinations.
 The current agent supports optional **PostgreSQL, MySQL and MongoDB connectors**
-and local Parquet storage. Additional destinations, including object storage, are planned.
+and local, customer-owned S3-compatible, or Azure Blob archive storage. See [destination setup](SINKS.md).
 
 ## Current capabilities
 
@@ -16,13 +16,15 @@ and local Parquet storage. Additional destinations, including object storage, ar
 - Optionally synchronize allowlisted lifecycle metadata with ColdCTL Cloud.
   Database contents and archive files stay local; Cloud cannot execute agent commands.
 
-This is an active-development release candidate. Source deletion, general archive
-querying, and mutable-source snapshot consistency are not implemented. Production
-qualification remains in progress; see the [validation record](docs/RELEASE_VALIDATION.md).
+This is an active-development release candidate. Verified PostgreSQL, MySQL and MongoDB source deletion
+is opt-in. General archive querying and mutable-source snapshot consistency are not implemented. Production
+qualification remains in progress. See [distribution and supported limits](RELEASING.md).
 
 ## Get started
 
-Build from source with Rust and the platform's native build prerequisites:
+Download a published Windows or Linux binary from [GitHub Releases](https://github.com/coldctl/coldctl/releases).
+See [installation and verification](RELEASING.md). Alternatively, build from source
+with Rust and the platform's native build prerequisites:
 
 ```bash
 cargo build --release --locked -p coldctl
@@ -39,17 +41,15 @@ coldctl status
 The Windows executable is `coldctl.exe`. SQLite is bundled. Use
 `--data-dir <path>` consistently to select an isolated state directory. Supply
 credentials through environment references and start with a bounded trial on
-stable data; the [operator runbook](docs/OPERATIONS.md) covers prerequisites and setup.
+stable data; the [cloud documentation](https://www.coldctl.com/docs) covers workflows.
 
 ## Documentation
 
-- [Product backlog for review](BACKLOG.md)
+- [Local and customer-owned S3 destinations](SINKS.md)
+- [Long-running archival scheduler](SCHEDULER.md)
+- [Verified source deletion](DELETION.md)
+- [GitHub downloads, connector signing and release procedure](RELEASING.md)
 - [Cloud documentation and command reference](https://www.coldctl.com/docs)
-- [Detailed CLI workflows](docs/CLI_GUIDE.md)
-- [Operator runbook](docs/OPERATIONS.md)
-- [Architecture](docs/architecture.md), [archive format](docs/archive-format.md),
-  and [Cloud sync protocol](docs/protocol.md)
-- [Release procedure](docs/RELEASING.md) and [validation evidence](docs/RELEASE_VALIDATION.md)
 
 The agent is a Cargo workspace: `coldctl` is the CLI, `coldctl-core` owns local
 archive operations, and `coldctl-cloud` implements optional metadata sync.
@@ -64,9 +64,9 @@ Database commands now require the separate `coldctl-connector-postgres` executab
 For development, run `cargo build --workspace`, set
 `COLDCTL_ALLOW_UNVERIFIED_CONNECTOR=1`, then set `COLDCTL_POSTGRES_CONNECTOR` to its
 absolute path. Existing source/password environment references
-continue to work. See [connector runtime setup](CONNECTOR_RUNTIME.md) for PowerShell
+continue to work. See [connector setup](RELEASING.md) for PowerShell
 commands, compatibility, packaging and tests. For signed packages and offline bundles,
-see [managed connector installation](CONNECTOR_INSTALLATION.md).
+see [managed connector installation](RELEASING.md).
 
 ### MySQL connector
 
@@ -74,10 +74,10 @@ MySQL 8.4/InnoDB support is available as the separate `coldctl-connector-mysql`
 executable. It supports discovery, analysis, bounded export/resume, unsigned keys,
 and transactional restore into a separate MySQL database. Run `coldctl init` to
 upgrade existing state before adding MySQL sources. See [setup, supported types,
-privileges and verification](MYSQL_CONNECTOR.md). PostgreSQL remains compatible.
+privileges and verification](RELEASING.md). PostgreSQL remains compatible.
 
 ### MongoDB connector
 
 MongoDB 8.0 replica-set support is available as the separate
 `coldctl-connector-mongodb` executable, with raw BSON archives and transactional
-restore. See [MongoDB setup, limits and qualification](MONGODB_PHASE5.md).
+restore. See [MongoDB setup, limits and qualification](RELEASING.md).

@@ -24,6 +24,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
       - run: cargo fmt --all -- --check
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
       - run: cargo build --locked -p coldctl-connector-postgres -p coldctl-connector-mysql -p coldctl-connector-mongodb
       - shell: bash
         run: |
@@ -37,6 +40,7 @@ jobs:
       - run: cargo test -p coldctl-core native_connector_runs_with_a_package_lease --locked -- --ignored
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: python scripts/check_connector_dependencies.py
+      - run: python scripts/test_release.py
   postgres:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -130,6 +134,76 @@ jobs:
       - run: cargo test -p coldctl-connector-mongodb --locked -- --ignored
       - if: always()
         run: docker rm -f -v coldctl-mongo-ci
+  s3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      AWS_ACCESS_KEY_ID: coldctl_fixture
+      AWS_SECRET_ACCESS_KEY: coldctl_fixture_only
+      COLDCTL_TEST_S3_ENDPOINT: http://127.0.0.1:19000
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - shell: bash
+        run: |
+          docker compose -f scripts/compose.s3.yml up -d
+          for attempt in {1..30}; do
+            if docker compose -f scripts/compose.s3.yml exec -T s3 python -c "import boto3; boto3.client('s3',endpoint_url='http://localhost:5000',region_name='us-east-1',aws_access_key_id='coldctl_fixture',aws_secret_access_key='coldctl_fixture_only').create_bucket(Bucket='coldctl-test')"; then break; fi
+            sleep 1
+          done
+      - run: cargo test --locked -p coldctl-core --lib s3_ -- --ignored
+      - if: always()
+        run: docker compose -f scripts/compose.s3.yml down
+  azure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      AZURE_STORAGE_ACCOUNT_KEY: Y29sZGN0bC1henVyaXRlLWZpeHR1cmUta2V5LW9ubHk=
+      COLDCTL_TEST_AZURE_ENDPOINT: http://127.0.0.1:11000/coldctltest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: docker compose -f scripts/compose.azure.yml up -d
+      - run: python3 scripts/init-azurite.py
+      - run: cargo test --locked -p coldctl-core --lib azure_ -- --ignored
+      - if: always()
+        run: docker compose -f scripts/compose.azure.yml down
+  recurring-s3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - shell: bash
+        run: |
+          docker run -d --name coldctl-recurring-pg -p 127.0.0.1:15446:5432 -e POSTGRES_PASSWORD=coldctl_recurring_fixture -e POSTGRES_DB=coldctl_test_source postgres:15
+          docker run -d --name coldctl-recurring-mongo -p 127.0.0.1:15443:27017 -v "$GITHUB_WORKSPACE/scripts:/fixture:ro" --entrypoint sh mongo:8.0 /fixture/mongodb_test_start.sh
+          docker compose -f scripts/compose.s3.yml up -d
+          for attempt in {1..60}; do
+            if docker exec coldctl-recurring-mongo mongosh --quiet --eval 'db.runCommand({ping:1})'; then break; fi
+            sleep 1
+          done
+          docker exec coldctl-recurring-mongo mongosh --quiet /fixture/mongodb_test_bootstrap.js
+          for attempt in {1..30}; do
+            if docker compose -f scripts/compose.s3.yml exec -T s3 python -c "import boto3; boto3.client('s3',endpoint_url='http://localhost:5000',region_name='us-east-1',aws_access_key_id='coldctl_fixture',aws_secret_access_key='coldctl_fixture_only').create_bucket(Bucket='coldctl-test')"; then break; fi
+            sleep 1
+          done
+      - run: cargo build --locked -p coldctl -p coldctl-connector-postgres -p coldctl-connector-mongodb
+      - run: python3 scripts/test_recurring_s3.py
+      - if: always()
+        run: |
+          docker rm -f -v coldctl-recurring-pg coldctl-recurring-mongo
+          docker compose -f scripts/compose.s3.yml down
   audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -322,31 +322,45 @@ fn mysql_migration_preserves_existing_source_policy_and_foreign_keys() {
     .unwrap();
     drop(conn);
     let old = sources::add(&paths, "old", connection()).unwrap();
-    coldctl_core::state::destinations::add_local(&paths, "disk", &temp.path().join("archives"))
-        .unwrap();
-    let policy = coldctl_core::state::archive::policy_create(
-        &paths,
-        "p",
-        "old",
-        "disk",
-        coldctl_core::policy::model::PolicyConfig {
-            schema: "public".into(),
-            table: "events".into(),
-            time_column: "created_at".into(),
-            older_than_days: 30,
-            batch_size: 2,
-            equals_column: None,
-            equals_value: None,
-        },
+    // Seed the actual v8 shape: current destination commands require schema 14.
+    let destination_id = uuid::Uuid::new_v4().to_string();
+    let policy_id = uuid::Uuid::new_v4().to_string();
+    let config = coldctl_core::policy::model::PolicyConfig {
+        schema: "public".into(),
+        table: "events".into(),
+        time_column: "created_at".into(),
+        older_than_days: 30,
+        batch_size: 2,
+        equals_column: None,
+        equals_value: None,
+    };
+    let conn = Connection::open(paths.database()).unwrap();
+    conn.execute(
+        "INSERT INTO destinations VALUES (?1,'disk','local',?2,'original')",
+        (
+            &destination_id,
+            temp.path().join("archives").to_str().unwrap(),
+        ),
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO policies VALUES (?1,'p',?2,?3,?4,'original')",
+        (
+            &policy_id,
+            &old.id,
+            &destination_id,
+            serde_json::to_string(&config).unwrap(),
+        ),
+    )
+    .unwrap();
+    drop(conn);
     state::initialize(&paths, "test").unwrap();
     assert_eq!(sources::show(&paths, "old").unwrap().id, old.id);
     assert_eq!(
         coldctl_core::state::archive::policy_show(&paths, "p")
             .unwrap()
             .id,
-        policy.id
+        policy_id
     );
     sources::add(
         &paths,

@@ -7,6 +7,283 @@ use coldctl_core::{
     state::{self, archive as store, destinations, sources},
 };
 use mysql_async::{Row, prelude::Queryable};
+
+#[tokio::test]
+#[ignore = "requires disposable MySQL 8.4, TLS environment and built connector"]
+async fn mysql_verified_deletion_rollback_replay_and_resume() {
+    use coldctl_core::{archive::deletion, source::connector::DeleteSpec};
+    let config = SourceConnection::from_mysql_url_env("COLDCTL_TEST_MYSQL_URL".into())
+        .unwrap()
+        .with_ca_env(Some("COLDCTL_TEST_MYSQL_CA".into()))
+        .unwrap();
+    let resolved = config.resolve().unwrap();
+    let mut admin = mysql::connect(&resolved, false).await.unwrap();
+    let name = format!(
+        "delete_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let target = mysql::table(&resolved.database, &name);
+    admin.query_drop(format!("CREATE TABLE {target}(id BIGINT UNSIGNED PRIMARY KEY, created_at DATETIME(6), note TEXT, bytes VARBINARY(8)) ENGINE=InnoDB")).await.unwrap();
+    for key in [0u64, 1, u64::MAX] {
+        admin
+            .exec_drop(
+                format!("INSERT INTO {target} VALUES(?,'2020-01-01','original',X'00FF')"),
+                (key,),
+            )
+            .await
+            .unwrap();
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
+    state::initialize(&paths, "test").unwrap();
+    sources::add(&paths, "source", config).unwrap();
+    destinations::add_local(&paths, "disk", &temp.path().join("archives")).unwrap();
+    store::policy_create(
+        &paths,
+        "events",
+        "source",
+        "disk",
+        PolicyConfig {
+            schema: resolved.database.clone(),
+            table: name.clone(),
+            time_column: "created_at".into(),
+            older_than_days: 365,
+            batch_size: 2,
+            equals_column: None,
+            equals_value: None,
+        },
+    )
+    .unwrap();
+    let job = executor::run(&paths, "events", run_options(None))
+        .await
+        .unwrap();
+    let options = |max_batches| deletion::Options {
+        confirm_delete: true,
+        confirm_original_source: true,
+        max_batches,
+        shutdown: Default::default(),
+    };
+    // A mismatch on the second row must roll back deletion of the first.
+    admin
+        .query_drop(format!(
+            "UPDATE {target} SET note=REPEAT('x',31000) WHERE id=1"
+        ))
+        .await
+        .unwrap();
+    assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
+    assert_eq!(
+        admin
+            .query_first::<u64, _>(format!("SELECT count(*) FROM {target}"))
+            .await
+            .unwrap(),
+        Some(3)
+    );
+    admin
+        .query_drop(format!("UPDATE {target} SET note='original' WHERE id=1"))
+        .await
+        .unwrap();
+    admin
+        .query_drop(format!(
+            "CREATE TRIGGER {} BEFORE DELETE ON {target} FOR EACH ROW SET @coldctl_trigger=1",
+            mysql::q(&format!("tr_{name}"))
+        ))
+        .await
+        .unwrap();
+    assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
+    admin
+        .query_drop(format!("DROP TRIGGER {}", mysql::q(&format!("tr_{name}"))))
+        .await
+        .unwrap();
+    let child = mysql::table("coldctl_test_restore", &name);
+    admin.query_drop(format!("CREATE TABLE {child}(id BIGINT UNSIGNED PRIMARY KEY, FOREIGN KEY(id) REFERENCES {target}(id) ON DELETE CASCADE) ENGINE=InnoDB")).await.unwrap();
+    assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
+    admin
+        .query_drop(format!("DROP TABLE {child}"))
+        .await
+        .unwrap();
+    // Commit without a host checkpoint, then replay through the real protocol.
+    let identity: String = admin
+        .query_first("SELECT @@server_uuid")
+        .await
+        .unwrap()
+        .unwrap();
+    let native: Vec<Row> = admin
+        .query(format!("SELECT * FROM {target} ORDER BY id LIMIT 2"))
+        .await
+        .unwrap();
+    let rows = native
+        .into_iter()
+        .map(|r| mysql::encode(r, &job.plan.columns).unwrap())
+        .collect::<Vec<_>>();
+    admin
+        .query_drop(format!(
+            "CREATE USER '{name}'@'%' IDENTIFIED BY 'coldctl_delete_role' REQUIRE SSL"
+        ))
+        .await
+        .unwrap();
+    admin
+        .query_drop(format!(
+            "GRANT SELECT, LOCK TABLES ON {}.* TO '{name}'@'%'",
+            mysql::q(&resolved.database)
+        ))
+        .await
+        .unwrap();
+    admin
+        .query_drop(format!("GRANT PROCESS ON *.* TO '{name}'@'%' "))
+        .await
+        .unwrap();
+    let mut restricted = resolved.clone();
+    restricted.user = name.clone();
+    restricted.password = Some("coldctl_delete_role".into());
+    let spec = DeleteSpec {
+        plan: job.plan.clone(),
+        source_identity: identity.clone(),
+    };
+    let mut denied = crate::mysql_delete::DeleteSession::open(restricted.clone(), spec.clone())
+        .await
+        .unwrap();
+    assert!(denied.batch(&rows).await.is_err());
+    drop(denied);
+    admin
+        .query_drop(format!("GRANT TRIGGER ON {target} TO '{name}'@'%' "))
+        .await
+        .unwrap();
+    let mut denied = crate::mysql_delete::DeleteSession::open(restricted.clone(), spec.clone())
+        .await
+        .unwrap();
+    assert!(denied.batch(&rows).await.is_err());
+    drop(denied);
+    admin
+        .query_drop(format!("GRANT DELETE ON {target} TO '{name}'@'%' "))
+        .await
+        .unwrap();
+    // A child table invisible to this role still prevents cascading deletion.
+    admin.query_drop(format!("CREATE TABLE {child}(id BIGINT UNSIGNED PRIMARY KEY, FOREIGN KEY(id) REFERENCES {target}(id) ON DELETE CASCADE) ENGINE=InnoDB")).await.unwrap();
+    let mut denied = crate::mysql_delete::DeleteSession::open(restricted.clone(), spec)
+        .await
+        .unwrap();
+    assert!(denied.batch(&rows).await.is_err());
+    drop(denied);
+    admin
+        .query_drop(format!("DROP TABLE {child}"))
+        .await
+        .unwrap();
+    let mut direct = crate::mysql_delete::DeleteSession::open(
+        restricted,
+        DeleteSpec {
+            plan: job.plan.clone(),
+            source_identity: identity,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(direct.batch(&rows).await.unwrap().deleted, 2);
+    drop(direct);
+    admin
+        .query_drop(format!("DROP USER '{name}'@'%' "))
+        .await
+        .unwrap();
+    let paused = deletion::run(&paths, &job.id, options(Some(1)))
+        .await
+        .unwrap();
+    assert_eq!(paused.rows_absent, 2);
+    assert!(!paused.completed);
+    let done = deletion::run(&paths, &job.id, options(None)).await.unwrap();
+    assert!(done.completed);
+    assert_eq!(done.rows_deleted, 1);
+    assert_eq!(
+        admin
+            .query_first::<u64, _>(format!("SELECT count(*) FROM {target}"))
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    for key in [0u64, 1, u64::MAX] {
+        admin
+            .exec_drop(
+                format!("INSERT INTO {target} VALUES(?,'2020-01-01','original',X'00FF')"),
+                (key,),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        deletion::run(&paths, &job.id, options(None))
+            .await
+            .unwrap()
+            .completed
+    );
+    assert_eq!(
+        admin
+            .query_first::<u64, _>(format!("SELECT count(*) FROM {target}"))
+            .await
+            .unwrap(),
+        Some(3)
+    );
+    use coldctl_core::{archive::controls::Shutdown, scheduler::Worker, state::scheduler as queue};
+    queue::enqueue(
+        &paths,
+        "events",
+        None,
+        queue::Options {
+            delete_after_archive: true,
+            source_stability: planner::SourceStability::QuiescentCopy,
+            allow_repeat: true,
+            confirm_original_source: true,
+            max_retries: 0,
+            execution: ExecutionControls {
+                max_duration_seconds: Some(60),
+                minimum_free_bytes: 1,
+                ..Default::default()
+            },
+        },
+        0,
+    )
+    .unwrap();
+    let worker = Worker::acquire(&paths).unwrap();
+    assert_eq!(
+        worker
+            .tick(Shutdown::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    assert_eq!(
+        admin
+            .query_first::<u64, _>(format!("SELECT count(*) FROM {target}"))
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    drop(worker);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let worker = Worker::acquire(&paths).unwrap();
+    assert_eq!(
+        worker
+            .tick(Shutdown::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert_eq!(
+        admin
+            .query_first::<u64, _>(format!("SELECT count(*) FROM {target}"))
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    admin
+        .query_drop(format!("DROP TABLE {target}"))
+        .await
+        .unwrap();
+}
 fn run_options(max: Option<u64>) -> executor::RunOptions {
     executor::RunOptions {
         source_stability: planner::SourceStability::QuiescentCopy,

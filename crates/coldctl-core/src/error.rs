@@ -2,6 +2,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Object storage: {reason}")]
+    ObjectStorage {
+        reason: &'static str,
+        retryable: bool,
+    },
     #[error("Connector error: {0}")]
     Connector(#[from] coldctl_connector_runtime::Error),
     #[error("Archive/policy error: {0}")]
@@ -86,6 +91,7 @@ impl Error {
     pub fn failure(&self) -> Failure {
         use FailureCategory::*;
         let (category, retryable, message) = match self {
+            Self::ObjectStorage { reason, retryable } => (Storage, *retryable, *reason),
             Self::JobFailed { failure, .. } => return failure.clone(),
             Self::Connector(error) => {
                 use coldctl_connector_runtime::Error as C;

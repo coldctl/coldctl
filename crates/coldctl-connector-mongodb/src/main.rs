@@ -1,3 +1,4 @@
+mod deletion;
 mod mongo;
 mod restore;
 use coldctl_connector_protocol::{capability::*, model::ConnectorPin};
@@ -62,6 +63,7 @@ struct Server {
     connection: Option<ResolvedConnection>,
     scan: Option<mongo::Mongo>,
     restore: Option<restore::RestoreSession>,
+    deletion: Option<deletion::DeleteSession>,
     bound: Option<(String, Option<coldctl_core::archive::key::ArchiveKey>)>,
 }
 impl Server {
@@ -72,6 +74,21 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::DeleteOpen(spec) => {
+                if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
+                    return Err(Error::Archive("session already opened"));
+                }
+                self.deletion =
+                    Some(deletion::DeleteSession::open(self.connection()?, spec).await?);
+                value(())
+            }
+            Request::DeleteBatch { rows } => value(
+                self.deletion
+                    .as_mut()
+                    .ok_or(Error::Archive("deletion not open"))?
+                    .batch(&rows)
+                    .await?,
+            ),
             Request::Configure(connection) => {
                 if self.connection.is_some()
                     || connection.port == 0
@@ -250,6 +267,10 @@ impl Server {
                 value(())
             }
             Request::Close | Request::Cancel => {
+                if let Some(deletion) = self.deletion.as_mut() {
+                    deletion.abort().await;
+                }
+                self.deletion = None;
                 if let Some(restore) = self.restore.as_mut() {
                     restore.abort().await;
                 }
@@ -280,7 +301,11 @@ async fn serve() -> runtime::Result<()> {
     let hello = Hello {
         protocol: CURRENT,
         connector: pin,
-        features: features.clone(),
+        features: features
+            .iter()
+            .cloned()
+            .chain(["verified-delete-v1".into()])
+            .collect(),
         required_host_features: features,
         capabilities: Capabilities {
             source: Some(SourceCapabilities {
@@ -336,6 +361,9 @@ async fn serve() -> runtime::Result<()> {
         };
         let failed = result.is_err();
         if failed {
+            if let Some(deletion) = server.deletion.as_mut() {
+                deletion.abort().await;
+            }
             if let Some(restore) = server.restore.as_mut() {
                 restore.abort().await;
             }

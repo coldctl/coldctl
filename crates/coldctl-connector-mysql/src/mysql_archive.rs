@@ -20,7 +20,10 @@ pub struct MysqlArchive {
 }
 impl MysqlArchive {
     pub async fn connect(c: ResolvedConnection) -> Result<Self, Error> {
-        let mut conn = mysql::connect(&c, true).await?;
+        Self::connect_mode(c, true).await
+    }
+    pub(crate) async fn connect_mode(c: ResolvedConnection, readonly: bool) -> Result<Self, Error> {
+        let mut conn = mysql::connect(&c, readonly).await?;
         let server: String = conn
             .query_first("SELECT @@server_uuid")
             .await
@@ -96,7 +99,7 @@ impl MysqlArchive {
             .map_err(err)?
             .ok_or_else(bad)?;
         let estimated_rows:Option<i64>=self.conn.exec_first("SELECT TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA=? AND TABLE_NAME=?",(&c.schema,&c.table)).await.map_err(err)?.flatten();
-        let plan=ArchivePlan{connector_pin:None,policy,destination_path,cutoff_utc,primary_key:key,table_oid:oid as u32,columns,estimated_rows,delete:false,warnings:vec!["MySQL 8.4 InnoDB: freeze eligible rows and membership through export/resume; no reusable snapshot is claimed. Data-only restore preserves primary key and column types, not secondary indexes, defaults or application constraints.".into()],safety:None};
+        let plan=ArchivePlan{destination_config:None,connector_pin:None,policy,destination_path,cutoff_utc,primary_key:key,table_oid:oid as u32,columns,estimated_rows,delete:false,warnings:vec!["MySQL 8.4 InnoDB: freeze eligible rows and membership through export/resume; no reusable snapshot is claimed. Data-only restore preserves primary key and column types, not secondary indexes, defaults or application constraints.".into()],safety:None};
         self.plan = Some(plan.clone());
         Ok(plan)
     }
@@ -348,7 +351,7 @@ pub async fn schema(
     Ok((columns, keys[0].clone(), table_id(conn, db, name).await?))
 }
 
-fn key_parameter(kind: &str, token: i64) -> Result<Value, Error> {
+pub(crate) fn key_parameter(kind: &str, token: i64) -> Result<Value, Error> {
     let value = mysql_types::key_value(kind, token);
     if mysql_types::parts(kind)?.0.ends_with(" unsigned") {
         Ok(Value::UInt(value.parse().map_err(|_| bad())?))

@@ -1,4 +1,9 @@
+pub mod azure;
 pub mod local;
+mod object;
+pub mod s3;
+mod storage;
+pub use storage::{DestinationConfig, for_job, open};
 
 use crate::error::Error;
 use serde::Serialize;
@@ -11,6 +16,7 @@ pub struct Destination {
     pub destination_type: String,
     pub path: PathBuf,
     pub created_at: String,
+    pub config: Option<DestinationConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -21,14 +27,19 @@ pub struct AccessCheck {
     pub probe_removed: bool,
 }
 
-/// Storage behavior belongs here; object put/verify methods arrive with archive execution.
+/// Shared sink contract: relative keys, create-only publication and verified reads.
 pub trait ArchiveDestination {
+    fn exists(&self, key: &str) -> Result<bool, Error>;
+    /// Return a seekable file containing exactly the checksum-verified object.
+    /// Remote implementations use a bounded, automatically deleted temporary file.
+    fn read_verified(&self, object: &StoredObject) -> Result<std::fs::File, Error>;
     fn test_access(&self) -> Result<AccessCheck, Error>;
+    /// Create without overwrite, read-back verify, then return the content receipt.
     fn put_file(&self, key: &str, source: &std::path::Path) -> Result<StoredObject, Error>;
     fn verify(&self, object: &StoredObject) -> Result<(), Error>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredObject {
     pub key: String,
     pub bytes: u64,

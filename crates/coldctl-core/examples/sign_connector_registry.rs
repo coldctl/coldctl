@@ -1,5 +1,6 @@
 //! Offline publisher utility. Uses existing authorized TUF keys; never creates or uploads keys.
-use std::{num::NonZeroU64, path::PathBuf};
+use base64::Engine;
+use std::{io::Write, num::NonZeroU64, path::PathBuf};
 use tough::{
     editor::RepositoryEditor,
     key_source::{KeySource, LocalKeySource},
@@ -37,7 +38,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         editor.add_target_path(file.path()).await?;
     }
-    let keys: Vec<Box<dyn KeySource>> = args[5..]
+    // tough accepts Ed25519 PKCS8 DER, but its PEM parser only supports RSA.
+    // Decode bootstrap PEM into temporary files without logging keys.
+    let mut decoded = Vec::new();
+    let mut paths = Vec::new();
+    for path in &args[5..] {
+        let data = std::fs::read(path)?;
+        if let Ok(text) = std::str::from_utf8(&data)
+            && let Some(body) = text.trim().strip_prefix("-----BEGIN PRIVATE KEY-----")
+            && let Some(body) = body.strip_suffix("-----END PRIVATE KEY-----")
+        {
+            let encoded: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+            let der = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+            let mut file = tempfile::NamedTempFile::new()?;
+            file.write_all(&der)?;
+            paths.push(file.path().to_path_buf());
+            decoded.push(file);
+        } else {
+            paths.push(PathBuf::from(path));
+        }
+    }
+    let keys: Vec<Box<dyn KeySource>> = paths
         .iter()
         .map(|path| {
             Box::new(LocalKeySource {

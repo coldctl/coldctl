@@ -18,6 +18,19 @@ pub struct Args {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Delete unchanged source records only after verifying their completed archive.
+    Delete {
+        id: String,
+        #[arg(long, required = true)]
+        confirm_delete: bool,
+        /// Confirm the original source, stable rows, and immutable archive files.
+        #[arg(long, required = true)]
+        confirm_original_source: bool,
+        #[arg(long)]
+        max_batches: Option<u64>,
+    },
+    /// Show durable source-deletion progress for an archive job.
+    DeletionStatus { id: String },
     /// Validate and estimate without reading table rows or writing archive files.
     Plan { policy: String },
     /// Export eligible rows to a NEW local Parquet job directory. Never deletes source rows.
@@ -83,6 +96,33 @@ pub enum Command {
 }
 pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
+        Command::Delete {
+            id,
+            confirm_delete,
+            confirm_original_source,
+            max_batches,
+        } => {
+            let signals = crate::execution::Signals::install()?;
+            let report = coldctl_core::archive::deletion::run(
+                paths,
+                &id,
+                coldctl_core::archive::deletion::Options {
+                    confirm_delete,
+                    confirm_original_source,
+                    max_batches,
+                    shutdown: signals.shutdown.clone(),
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::DeletionStatus { id } => {
+            coldctl_core::state::archive::job_show(paths, &id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&coldctl_core::state::deletion::show(paths, &id)?)?
+            );
+        }
         Command::Restore {
             id,
             target,
@@ -261,8 +301,23 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
                     job.rows_processed, job.objects_created, job.bytes_written
                 );
                 println!(
-                    "Directory: {}",
-                    text(&job.plan.destination_path.join(&job.id).to_string_lossy())
+                    "Archive: {}",
+                    text(
+                        &job.plan
+                            .destination_config
+                            .as_ref()
+                            .map(|config| format!(
+                                "{}/{}",
+                                config.location().trim_end_matches('/'),
+                                job.id
+                            ))
+                            .unwrap_or_else(|| job
+                                .plan
+                                .destination_path
+                                .join(&job.id)
+                                .to_string_lossy()
+                                .into_owned())
+                    )
                 );
                 println!("Source rows were not deleted.");
             }
@@ -284,7 +339,13 @@ pub(super) fn print_plan(plan: &ArchivePlan, output: Output) -> Result<(), serde
         text(&plan.policy.config.time_column),
         text(&plan.cutoff_utc),
         text(&plan.primary_key),
-        text(&plan.destination_path.to_string_lossy()),
+        text(
+            &plan
+                .destination_config
+                .as_ref()
+                .map(|config| config.location())
+                .unwrap_or_else(|| plan.destination_path.to_string_lossy().into_owned())
+        ),
         plan.policy.config.batch_size,
         plan.estimated_rows
             .map(|n| format!("~{n} (planner estimate)"))

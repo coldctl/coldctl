@@ -1,5 +1,6 @@
 mod postgres;
 mod postgres_archive;
+mod postgres_delete;
 mod postgres_restore;
 use coldctl_connector_protocol::{capability::*, model::ConnectorPin};
 use coldctl_connector_runtime::{self as runtime, Call, Reply, transport};
@@ -48,6 +49,7 @@ struct Server {
     connection: Option<ResolvedConnection>,
     scan: Option<postgres_archive::PostgresArchive>,
     restore: Option<postgres_restore::RestoreSession>,
+    deletion: Option<postgres_delete::DeleteSession>,
     bound: Option<(String, Option<coldctl_core::archive::key::ArchiveKey>)>,
 }
 impl Server {
@@ -58,6 +60,21 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::DeleteOpen(spec) => {
+                if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
+                    return Err(Error::Archive("session already opened"));
+                }
+                self.deletion =
+                    Some(postgres_delete::DeleteSession::open(self.connection()?, spec).await?);
+                value(())
+            }
+            Request::DeleteBatch { rows } => value(
+                self.deletion
+                    .as_mut()
+                    .ok_or(Error::Archive("deletion not open"))?
+                    .batch(&rows)
+                    .await?,
+            ),
             Request::Configure(connection) => {
                 if self.connection.is_some()
                     || connection.port == 0
@@ -237,6 +254,7 @@ impl Server {
                 value(())
             }
             Request::Close | Request::Cancel => {
+                self.deletion = None;
                 self.scan = None;
                 self.restore = None;
                 self.connection = None;
@@ -264,7 +282,11 @@ async fn serve() -> runtime::Result<()> {
     let hello = Hello {
         protocol: CURRENT,
         connector: pin,
-        features: features.clone(),
+        features: features
+            .iter()
+            .cloned()
+            .chain(["verified-delete-v1".into()])
+            .collect(),
         required_host_features: features,
         capabilities: Capabilities {
             source: Some(SourceCapabilities {

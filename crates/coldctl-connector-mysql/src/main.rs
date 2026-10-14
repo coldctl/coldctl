@@ -1,5 +1,6 @@
 mod mysql;
 mod mysql_archive;
+mod mysql_delete;
 mod mysql_restore;
 use coldctl_connector_protocol::{capability::*, model::ConnectorPin};
 use coldctl_connector_runtime::{self as runtime, Call, Reply, transport};
@@ -63,6 +64,7 @@ struct Server {
     connection: Option<ResolvedConnection>,
     scan: Option<mysql_archive::MysqlArchive>,
     restore: Option<mysql_restore::RestoreSession>,
+    deletion: Option<mysql_delete::DeleteSession>,
     bound: Option<(String, Option<coldctl_core::archive::key::ArchiveKey>)>,
 }
 impl Server {
@@ -73,6 +75,21 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::DeleteOpen(spec) => {
+                if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
+                    return Err(Error::Archive("session already opened"));
+                }
+                self.deletion =
+                    Some(mysql_delete::DeleteSession::open(self.connection()?, spec).await?);
+                value(())
+            }
+            Request::DeleteBatch { rows } => value(
+                self.deletion
+                    .as_mut()
+                    .ok_or(Error::Archive("deletion not open"))?
+                    .batch(&rows)
+                    .await?,
+            ),
             Request::Configure(connection) => {
                 if self.connection.is_some()
                     || connection.port == 0
@@ -257,6 +274,10 @@ impl Server {
                 value(())
             }
             Request::Close | Request::Cancel => {
+                if let Some(deletion) = self.deletion.as_mut() {
+                    deletion.abort().await;
+                }
+                self.deletion = None;
                 self.scan = None;
                 self.restore = None;
                 self.connection = None;
@@ -284,7 +305,11 @@ async fn serve() -> runtime::Result<()> {
     let hello = Hello {
         protocol: CURRENT,
         connector: pin,
-        features: features.clone(),
+        features: features
+            .iter()
+            .cloned()
+            .chain(["verified-delete-v1".into()])
+            .collect(),
         required_host_features: features,
         capabilities: Capabilities {
             source: Some(SourceCapabilities {
@@ -329,14 +354,21 @@ async fn serve() -> runtime::Result<()> {
         }
         session = Some(request.session.clone());
         let close = matches!(request.body, Request::Close | Request::Cancel);
-        let result = tokio::time::timeout(
+        let result = match tokio::time::timeout(
             std::time::Duration::from_millis(request.deadline_ms.into()),
             server.dispatch(request.body),
         )
         .await
-        .map_err(|_| runtime::Error::Timeout)?
-        .map_err(|e| classify(&e));
+        {
+            Ok(result) => result.map_err(|e| classify(&e)),
+            Err(_) => Err(runtime::Error::Timeout),
+        };
         let failed = result.is_err();
+        if failed {
+            if let Some(deletion) = server.deletion.as_mut() {
+                deletion.abort().await;
+            }
+        }
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
             transport::send(

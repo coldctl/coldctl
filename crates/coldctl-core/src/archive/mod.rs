@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod checkpoint;
 pub mod controls;
+pub mod deletion;
 pub mod executor;
 pub mod manifest;
 pub mod planner;

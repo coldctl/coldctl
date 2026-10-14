@@ -73,6 +73,17 @@ impl LocalDestination {
 }
 
 impl ArchiveDestination for LocalDestination {
+    fn exists(&self, key: &str) -> Result<bool, Error> {
+        self.object_path(key)?
+            .try_exists()
+            .map_err(|_| Error::Archive("cannot inspect destination object"))
+    }
+    fn read_verified(&self, object: &super::StoredObject) -> Result<File, Error> {
+        self.verify(object)?;
+        File::open(self.object_path(&object.key)?)
+            .map_err(|_| Error::Archive("cannot open verified archive"))
+    }
+
     fn put_file(&self, key: &str, source: &Path) -> Result<super::StoredObject, Error> {
         let target = self.object_path(key)?;
         let parent = target

@@ -53,6 +53,16 @@ pub async fn run_with_preflight_report(
     options: RunOptions,
     report: impl FnOnce(&ArchivePlan),
 ) -> Result<store::Job, Error> {
+    run_queued(paths, name, options, report, None).await
+}
+
+pub(crate) async fn run_queued(
+    paths: &StatePaths,
+    name: &str,
+    options: RunOptions,
+    report: impl FnOnce(&ArchivePlan),
+    queue_id: Option<&str>,
+) -> Result<store::Job, Error> {
     let started = Instant::now();
     let mut controls = options.execution.clone();
     controls.minimum_free_bytes = options.minimum_free_bytes;
@@ -64,7 +74,9 @@ pub async fn run_with_preflight_report(
     let destination = destinations::show(paths, &policy.destination)?;
     let mut reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
     reader.configure_timeouts(&controls).await?;
-    let mut plan = reader.plan(policy, destination.path).await?;
+    let mut plan = reader.plan(policy, destination.path.clone()).await?;
+    plan.destination_config = destination.config.clone();
+    crate::destination::open(destination.config.as_ref(), &destination.path)?.test_access()?;
     let source_identity = reader.source_identity(plan.table_oid).await?;
     let minimum_free_bytes = options.minimum_free_bytes.max(1);
     let available =
@@ -75,15 +87,17 @@ pub async fn run_with_preflight_report(
         available_bytes_at_preflight: available,
         minimum_free_bytes,
     });
+    crate::state::recurring::guard_plan(paths, queue_id, &mut plan, reader.identity())?;
     report(&plan);
     let upper = reader.upper_key(&plan).await?;
-    let job = store::job_create(
+    let job = store::job_create_queued(
         paths,
         &plan,
         &source.id,
         reader.identity(),
         upper,
         &controls,
+        queue_id,
     )?;
     let _guard = journal::lock(paths, &job.id)?;
     execute_observed(
@@ -92,7 +106,13 @@ pub async fn run_with_preflight_report(
         &mut reader,
         &controls,
         &options.shutdown,
-        started,
+        // A scheduled slice budgets export work, not preflight. Otherwise a
+        // slow preflight can exhaust every slice before any batch is written.
+        if queue_id.is_some() {
+            Instant::now()
+        } else {
+            started
+        },
         options.progress,
     )
     .await
@@ -133,6 +153,27 @@ pub async fn resume_with_progress(
     shutdown: Shutdown,
     observer: Option<Observer>,
 ) -> Result<store::Job, Error> {
+    resume_scheduled(
+        paths,
+        id,
+        confirm_original_source,
+        controls,
+        shutdown,
+        observer,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn resume_scheduled(
+    paths: &StatePaths,
+    id: &str,
+    confirm_original_source: bool,
+    controls: ExecutionControls,
+    shutdown: Shutdown,
+    observer: Option<Observer>,
+    preserve_cancellation: bool,
+) -> Result<store::Job, Error> {
     controls.validate()?;
     let started = Instant::now();
     let _guard = journal::lock(paths, id)?;
@@ -149,7 +190,13 @@ pub async fn resume_with_progress(
     }
     let checkpoint = journal::load(paths, id)?;
     journal::execution(paths, id, &controls)?;
-    journal::restart(paths, id)?;
+    if preserve_cancellation {
+        if !journal::restart_uncancelled(paths, id)? {
+            return store::job_show(paths, id);
+        }
+    } else {
+        journal::restart(paths, id)?;
+    }
     let mut progress = Reporter::new(paths, id, started, observer.clone())?;
     let result = async {
         progress.stage(Stage::Validating)?;
@@ -176,14 +223,20 @@ pub async fn resume_with_progress(
         reader.configure_timeouts(&controls).await?;
         progress.stage(Stage::Validating)?;
         reader.validate_resume(&job.plan).await?;
-        LocalDestination::new(job.plan.destination_path.clone())?.test_access()?;
+        crate::destination::for_job(&job)?.test_access()?;
         execute_observed(
             paths,
             id,
             &mut reader,
             &controls,
             &shutdown,
-            started,
+            // Verification grows with the archive. Always grant scheduled
+            // resumes a fresh export budget after integrity/source validation.
+            if preserve_cancellation {
+                Instant::now()
+            } else {
+                started
+            },
             observer.clone(),
         )
         .await
@@ -275,22 +328,29 @@ async fn execute_observed(
 }
 
 pub(crate) fn publish(
-    destination: &LocalDestination,
+    destination: &dyn ArchiveDestination,
     expected: &StoredObject,
     source: &std::path::Path,
 ) -> Result<(), Error> {
-    let target = destination.object_path(&expected.key)?;
-    match target.try_exists() {
+    match destination.exists(&expected.key) {
         Ok(true) => destination.verify(expected),
         Ok(false) => {
             let (bytes, sha256) = fingerprint(source)?;
             if bytes != expected.bytes || sha256 != expected.sha256 {
                 return Err(Error::Archive("staged object failed verification"));
             }
-            destination.put_file(&expected.key, source)?;
-            destination.verify(expected)
+            // Each sink read-back verifies publication. Compare its receipt with
+            // the journal without downloading an S3 object a second time.
+            let stored = destination.put_file(&expected.key, source)?;
+            if stored.key != expected.key
+                || stored.bytes != expected.bytes
+                || stored.sha256 != expected.sha256
+            {
+                return Err(Error::Archive("published object differs from checkpoint"));
+            }
+            Ok(())
         }
-        Err(_) => Err(Error::Archive("cannot inspect destination object")),
+        Err(error) => Err(error),
     }
 }
 
@@ -350,7 +410,8 @@ async fn export(
     }
     let initial_rows = job.rows_processed;
     let mut next_batch = Instant::now();
-    let destination = LocalDestination::new(job.plan.destination_path.clone())?;
+    let staging = LocalDestination::new(job.plan.destination_path.clone())?;
+    let destination = crate::destination::for_job(&job)?;
     loop {
         if journal::cancelled(paths, id)? {
             return Ok(());
@@ -401,7 +462,7 @@ async fn export(
                 let Some(upper) = checkpoint.upper else {
                     break;
                 };
-                if !destination.has_capacity(controls.minimum_free_bytes, 0)? {
+                if !staging.has_capacity(controls.minimum_free_bytes, 0)? {
                     journal::pause(paths, id, "destination free-space reserve reached")?;
                     return Ok(());
                 }
@@ -424,7 +485,7 @@ async fn export(
                     .metadata()
                     .map_err(|_| Error::Archive("cannot inspect encoded batch"))?
                     .len();
-                if !destination
+                if !staging
                     .has_capacity(controls.minimum_free_bytes, encoded_bytes.saturating_mul(2))?
                 {
                     journal::pause(
@@ -436,7 +497,7 @@ async fn export(
                 }
                 let staged_key = format!("{id}/.staged-{}.parquet", uuid::Uuid::new_v4());
                 progress.stage(Stage::Staging)?;
-                let staged = destination.put_file(&staged_key, encoded.path())?;
+                let staged = staging.put_file(&staged_key, encoded.path())?;
                 let entry = journal::Entry {
                     batch: ManifestObject {
                         object: StoredObject {
@@ -462,7 +523,7 @@ async fn export(
         {
             return Err(Error::Archive("invalid pending object key"));
         }
-        if !destination.has_capacity(controls.minimum_free_bytes, entry.batch.object.bytes)? {
+        if !staging.has_capacity(controls.minimum_free_bytes, entry.batch.object.bytes)? {
             journal::pause(
                 paths,
                 id,
@@ -472,15 +533,15 @@ async fn export(
         }
         progress.stage(Stage::Publishing)?;
         publish(
-            &destination,
+            destination.as_ref(),
             &entry.batch.object,
-            &destination.object_path(&entry.staged_key)?,
+            &staging.object_path(&entry.staged_key)?,
         )?;
         progress.stage(Stage::Checkpointing)?;
         journal::commit(paths, id, sequence, &entry)?;
         progress.stage(Stage::Waiting)?;
         // Cleanup is best effort: a crash may leave an unreferenced staging file.
-        let _ = std::fs::remove_file(destination.object_path(&entry.staged_key)?);
+        let _ = std::fs::remove_file(staging.object_path(&entry.staged_key)?);
         job = store::job_show(paths, id)?;
         next_batch = Instant::now() + Duration::from_millis(controls.batch_delay_ms);
     }
@@ -515,11 +576,11 @@ async fn export(
     } else {
         journal::manifest(paths, id, &object)?;
     }
-    if !destination.has_capacity(controls.minimum_free_bytes, object.bytes)? {
+    if !staging.has_capacity(controls.minimum_free_bytes, object.bytes)? {
         journal::pause(paths, id, "insufficient free space to publish manifest")?;
         return Ok(());
     }
-    publish(&destination, &object, file.path())?;
+    publish(destination.as_ref(), &object, file.path())?;
     // Cancellation is cooperative; once finalization wins, the job is complete.
     if !journal::cancelled(paths, id)? {
         store::job_finish(paths, id, None)?;
@@ -586,6 +647,7 @@ mod tests {
                     equals_value: None,
                 },
             },
+            destination_config: None,
             destination_path: temp.path().join("archives"),
             cutoff_utc: "2025-01-01T00:00:00Z".into(),
             primary_key: "id".into(),
@@ -644,6 +706,120 @@ mod tests {
         Reader {
             calls: vec![],
             cancel: None,
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires COLDCTL_TEST_S3_ENDPOINT and fixture AWS credentials; existing coldctl-test bucket"]
+    async fn s3_archive_replays_publication_and_reads_restore_batches() {
+        remote_archive_replays(false).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires Azurite, COLDCTL_TEST_AZURE_ENDPOINT and fixture AZURE_STORAGE_ACCOUNT_KEY"]
+    async fn azure_archive_replays_publication_and_reads_restore_batches() {
+        remote_archive_replays(true).await;
+    }
+    async fn remote_archive_replays(azure: bool) {
+        use crate::destination::{DestinationConfig, azure::AzureConfig, s3::S3Config};
+        for publication in [0, 1, 2] {
+            let (temp, paths, old) = fixture();
+            let mut plan = old.plan;
+            plan.destination_config = Some(if azure {
+                DestinationConfig::Azure(AzureConfig {
+                    account: "coldctltest".into(),
+                    container: "coldctl-test".into(),
+                    prefix: format!("tests/{}", uuid::Uuid::new_v4()),
+                    endpoint: Some(std::env::var("COLDCTL_TEST_AZURE_ENDPOINT").unwrap()),
+                    account_key_env: "AZURE_STORAGE_ACCOUNT_KEY".into(),
+                    allow_http: true,
+                })
+            } else {
+                DestinationConfig::S3(S3Config {
+                    bucket: "coldctl-test".into(),
+                    region: "us-east-1".into(),
+                    prefix: format!("tests/{}", uuid::Uuid::new_v4()),
+                    endpoint: Some(std::env::var("COLDCTL_TEST_S3_ENDPOINT").unwrap()),
+                    access_key_env: "AWS_ACCESS_KEY_ID".into(),
+                    secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+                    session_token_env: None,
+                    allow_http: true,
+                })
+            });
+            let job = store::job_create(
+                &paths,
+                &plan,
+                "source",
+                "identity",
+                Some(3.into()),
+                &ExecutionControls::default(),
+            )
+            .unwrap();
+            let sink = crate::destination::for_job(&job).unwrap();
+            sink.test_access().unwrap();
+            let staged = pending(&paths, &job);
+            if publication == 1 {
+                let local = LocalDestination::new(plan.destination_path.clone()).unwrap();
+                publish(
+                    sink.as_ref(),
+                    &staged.batch.object,
+                    &local.object_path(&staged.staged_key).unwrap(),
+                )
+                .unwrap();
+            }
+            if publication == 2 {
+                let mut wrong = tempfile::NamedTempFile::new().unwrap();
+                wrong.write_all(b"wrong existing object").unwrap();
+                sink.put_file(&staged.batch.object.key, wrong.path())
+                    .unwrap();
+                assert!(execute(&paths, &job.id, &mut reader()).await.is_err());
+                assert_eq!(store::job_show(&paths, &job.id).unwrap().rows_processed, 0);
+                assert!(!sink.exists(&format!("{}/manifest.json", job.id)).unwrap());
+                continue;
+            }
+            assert!(!sink.exists(&format!("{}/manifest.json", job.id)).unwrap());
+            let mut source = reader();
+            let complete = execute(&paths, &job.id, &mut source).await.unwrap();
+            assert_eq!(complete.status, store::JobStatus::Completed);
+            assert_eq!(complete.rows_processed, 3);
+            assert_eq!(source.calls[0].0, Some(2)); // Pending data was not reread.
+            assert!(verifier::verify(&paths, &job.id).unwrap().verified);
+            assert_eq!(
+                crate::source::postgres_restore::read_batch(&paths, &complete, 1).unwrap(),
+                vec![vec![Some("1".into())], vec![Some("2".into())]]
+            );
+            assert_eq!(
+                std::fs::read_dir(plan.destination_path.join(&job.id))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert!(sink.exists(&format!("{}/manifest.json", job.id)).unwrap());
+            // Downloaded archives retain the original manifest but import from the
+            // explicit directory, never the remote configuration inside it.
+            let directory = temp.path().join("downloaded").join(&job.id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut objects = vec![journal::load(&paths, &job.id).unwrap().manifest.unwrap()];
+            for seq in 1..=complete.objects_created {
+                objects.push(
+                    journal::entry(&paths, &job.id, seq)
+                        .unwrap()
+                        .unwrap()
+                        .0
+                        .batch
+                        .object,
+                );
+            }
+            for object in objects {
+                let mut input = sink.read_verified(&object).unwrap();
+                let mut output =
+                    std::fs::File::create(directory.join(object.key.rsplit('/').next().unwrap()))
+                        .unwrap();
+                std::io::copy(&mut input, &mut output).unwrap();
+            }
+            assert!(
+                super::super::recovery::verify_directory(&directory, None)
+                    .unwrap()
+                    .verified
+            );
         }
     }
     #[tokio::test]
@@ -779,7 +955,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
+        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -878,7 +1054,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
+        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -1059,7 +1235,7 @@ mod tests {
         .unwrap();
         assert!(start.elapsed() >= Duration::from_millis(120));
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
+        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
         state::initialize(&paths, "upgrade").unwrap();
         verifier::verify(&paths, &job.id).unwrap();
         assert_eq!(store::job_show(&paths, &job.id).unwrap().rows_processed, 3);
@@ -1108,7 +1284,7 @@ mod tests {
         let old = include_str!("../../migrations/0004_archive.sql");
         let start = old.find("CREATE TABLE jobs").unwrap();
         conn.execute_batch(&old[start..]).unwrap();
-        conn.execute_batch("INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
+        conn.execute_batch("INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
         state::initialize(&paths, "upgraded").unwrap();
         assert_eq!(state::status(&paths).unwrap(), installation);
         let preserved = store::job_show(&paths, &job.id).unwrap();

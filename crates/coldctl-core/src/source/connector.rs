@@ -54,8 +54,24 @@ pub enum Request {
     RestoreFinish {
         completed: bool,
     },
+    DeleteOpen(DeleteSpec),
+    DeleteBatch {
+        rows: Vec<Vec<Option<String>>>,
+    },
     Close,
     Cancel,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteSpec {
+    pub plan: ArchivePlan,
+    pub source_identity: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteBatchResult {
+    pub deleted: u64,
+    pub absent: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

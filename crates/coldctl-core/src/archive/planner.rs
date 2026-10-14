@@ -37,6 +37,8 @@ pub struct ArchivePlan {
     pub connector_pin: Option<coldctl_connector_protocol::model::ConnectorPin>,
     pub policy: Policy,
     pub destination_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_config: Option<crate::destination::DestinationConfig>,
     pub cutoff_utc: String,
     pub primary_key: String,
     pub table_oid: u32,
@@ -53,5 +55,7 @@ pub async fn plan(paths: &StatePaths, name: &str) -> Result<ArchivePlan, Error> 
     let source = sources::show(paths, &policy.source)?;
     let destination = destinations::show(paths, &policy.destination)?;
     let reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
-    reader.plan(policy, destination.path).await
+    let mut plan = reader.plan(policy, destination.path).await?;
+    plan.destination_config = destination.config;
+    Ok(plan)
 }
