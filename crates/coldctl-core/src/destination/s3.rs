@@ -152,7 +152,7 @@ mod tests {
     use super::super::object::runtime;
     use super::*;
     use crate::destination::ArchiveDestination;
-    use object_store::ObjectStore;
+    use object_store::ObjectStoreExt;
     fn config() -> S3Config {
         S3Config {
             role_auth: false,

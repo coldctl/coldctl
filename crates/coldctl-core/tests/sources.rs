@@ -199,7 +199,9 @@ async fn connection_failures_are_safe_and_bounded() {
         listener.local_addr().unwrap().port()
     );
     let source = PostgresSource::new(SourceConnection::from_url(&url, None).unwrap());
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), source.test_connection())
+    // Includes process startup and hashing the debug connector in addition to the
+    // connector's independent 10-second database connection deadline.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(90), source.test_connection())
         .await
         .unwrap();
     assert!(result.unwrap_err().to_string().contains("timed out"));

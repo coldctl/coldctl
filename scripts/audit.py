@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 EXPIRES = date(2026, 12, 31)
 
@@ -35,6 +36,8 @@ def main():
     output.parent.mkdir(exist_ok=True)
     output.write_text(result.stdout, encoding="utf-8")
     if result.returncode:
+        print(result.stderr, file=sys.stderr)
+        print(result.stdout, file=sys.stderr)
         raise SystemExit("cargo-audit failed (including possible network/registry failure); inspect target/audit.json and rerun cargo-audit for diagnostics")
     report = json.loads(result.stdout)
     errors = findings(report, datetime.now(timezone.utc).date())

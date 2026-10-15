@@ -42,6 +42,7 @@ jobs:
       - run: python scripts/check_connector_dependencies.py
       - run: python scripts/package.py --check-inputs
       - run: python scripts/test_package.py
+      - run: python scripts/test_azurite_init.py
       - run: python scripts/test_release.py
       - run: cargo build --locked -p coldctl
       - run: python scripts/test-background-sync.py
@@ -76,7 +77,8 @@ jobs:
       - run: echo "COLDCTL_SIGNED_TEST_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-postgres" >> "$GITHUB_ENV"
       - run: echo "COLDCTL_SIGNED_TEST_MYSQL_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mysql" >> "$GITHUB_ENV"
       - run: echo "COLDCTL_SIGNED_TEST_MONGODB_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mongodb" >> "$GITHUB_ENV"
-      - run: cargo test --workspace --exclude coldctl-connector-mysql --exclude coldctl-connector-mongodb --locked -- --ignored
+      # Object-storage integration tests run in the s3 and azure jobs with their own fixtures.
+      - run: cargo test --workspace --exclude coldctl-connector-mysql --exclude coldctl-connector-mongodb --locked -- --ignored --skip s3_ --skip azure_
   mysql:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -222,3 +224,11 @@ jobs:
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: python scripts/test_audit.py
       - run: python scripts/audit.py
+      - name: Preserve dependency audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/audit.json
+          if-no-files-found: warn
+          retention-days: 7

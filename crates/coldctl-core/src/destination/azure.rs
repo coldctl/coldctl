@@ -136,7 +136,7 @@ pub type AzureDestination = super::object::ObjectDestination;
 mod tests {
     use super::*;
     use crate::destination::ArchiveDestination;
-    use object_store::ObjectStore;
+    use object_store::ObjectStoreExt;
     fn config() -> AzureConfig {
         AzureConfig {
             managed_identity: false,

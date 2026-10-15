@@ -74,7 +74,9 @@ def main():
             cli('destination', 'add', 's3', '--name', 's3', '--bucket', 'coldctl-test', '--region', 'us-east-1', '--prefix', f'recurring/{name}', '--endpoint', 'http://127.0.0.1:19000', '--allow-http')
             for source, schema, stability in [('pg', 'public', 'immutable-rows'), ('mongo', 'coldctl_mongo_source', 'quiescent-copy')]:
                 cli('policy', 'create', '--name', source, '--source', source, '--destination', 's3', '--schema', schema, '--table', name, '--time-column', 'created_at', '--older-than-days', '90', '--batch-size', '1')
-                cli('agent', 'scheduler', 'recurring', 'create', source, '--every-seconds', '60', '--source-stability', stability, '--confirm-original-source', '--delete-after-archive', '--max-rows', '1', '--min-free-bytes', '1')
+                # Advance schedules explicitly below. A short real-time interval can
+                # start the faster source's next cycle while the slower one is running.
+                cli('agent', 'scheduler', 'recurring', 'create', source, '--every-seconds', '86400', '--source-stability', stability, '--confirm-original-source', '--delete-after-archive', '--max-rows', '1', '--min-free-bytes', '1')
             cycles(1)
             assert pg(f'SELECT count(*) FROM public.{name}') == '1'
             assert mongo(f'print({collection}.countDocuments({{}}))') == '1'

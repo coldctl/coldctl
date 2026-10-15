@@ -5,7 +5,7 @@ use super::{
 };
 use crate::error::Error;
 use futures_util::StreamExt;
-use object_store::PutMode;
+use object_store::{ObjectStoreExt, PutMode};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -31,7 +31,7 @@ fn remote(error: object_store::Error) -> Error {
             "create-only precondition failed; existing object preserved",
             false,
         ),
-        NotSupported { .. } | NotImplemented => ("required storage operation unsupported", false),
+        NotSupported { .. } => ("required storage operation unsupported", false),
         Generic { .. } | JoinError { .. } => (
             "request failed after bounded retries; remote details redacted",
             true,

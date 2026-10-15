@@ -27,7 +27,7 @@ def create_container():
             raise
 
 
-if __name__ == "__main__":
+def wait_for_container():
     for attempt in range(30):
         try:
             create_container()
@@ -35,7 +35,11 @@ if __name__ == "__main__":
             break
         except urllib.error.HTTPError:
             raise
-        except urllib.error.URLError:
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
             if attempt == 29:
                 raise
             time.sleep(1)
+
+
+if __name__ == "__main__":
+    wait_for_container()

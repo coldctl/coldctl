@@ -140,7 +140,9 @@ impl Client {
             }
         });
         let hello: Hello =
-            match tokio::time::timeout(Duration::from_secs(10), transport::receive(&mut output, 0))
+            // The child hashes its executable before hello. Large debug connectors
+            // on shared runners need startup headroom; operation deadlines are separate.
+            match tokio::time::timeout(Duration::from_secs(30), transport::receive(&mut output, 0))
                 .await
             {
                 Ok(Ok(hello)) => hello,
