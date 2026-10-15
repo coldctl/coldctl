@@ -91,7 +91,7 @@ def prepare(args):
     release_version = version(args.tag)
     root = ROOT / 'release' / 'root.json'
     if not root.is_file() or not os.environ.get('COLDCTL_TUF_ONLINE_KEY'):
-        raise ValueError('Complete the signing bootstrap in RELEASING.md first')
+        raise ValueError('Configure release/root.json and the COLDCTL_TUF_ONLINE_KEY Actions secret first')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     # Stable alias names make portal links work without updating the website per version.
@@ -147,6 +147,15 @@ def prepare(args):
     manifest = {'version': release_version, 'tag': args.tag, 'commit': os.environ.get('GITHUB_SHA'), 'registry_root_sha256': digest(root), 'assets': entries}
     (out / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     (out / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(out.iterdir())), encoding='ascii')
+    write_notes(args, release_version, root)
+
+
+def write_notes(args, release_version, root):
+    out = args.out.resolve()
+    install = (f"coldctl connector install postgres --version {release_version} --file PATH_TO_EXTRACTED_REGISTRY"
+               if '-' in args.tag else f"coldctl connector install postgres --version {release_version}")
+    channel = ("PRERELEASE: extract this release's connector-registry.zip and use its offline registry in a separate data directory. Do not install this preview version from the stable registry."
+               if '-' in args.tag else "Stable release: install connectors from the authenticated online registry.")
     (out.parent / 'release-notes.md').write_text(f'''Coldctl {args.tag}
 
 Download `coldctl-windows-x64.zip` or `coldctl-linux-x64.tar.gz`, extract it, and add the binary to PATH.
@@ -156,7 +165,9 @@ Linux packages are built on Ubuntu 24.04; older glibc distributions are not qual
 Verify `SHA256SUMS` with `gh attestation verify SHA256SUMS --repo {args.repo}` before checking download hashes.
 The attested checksums cover every release asset. Archives also include BUILD-INFO.json.
 
-Registry: https://github.com/{args.repo}/releases/latest/download/
+{channel}
+
+Stable registry URL: https://github.com/{args.repo}/releases/latest/download/
 Public root SHA256: `{digest(root)}`
 Obtain root.json and independently verify its fingerprint against the committed release/root.json.
 Then run:
@@ -164,13 +175,13 @@ Then run:
 ```text
 coldctl init
 coldctl connector registry --url https://github.com/{args.repo}/releases/latest/download/ --root root.json --root-sha256 {digest(root)}
-coldctl connector install postgres --version {release_version}
+{install}
 ```
 
 Replace postgres with mysql or mongodb as needed. The root key never enters CI.
 Prerelease assets are previews; the latest registry URL resolves to the latest stable release.
 `connector-registry.zip` provides a signed offline repository for `connector install --file`.
-See RELEASING.md for first-install trust, key rotation, metadata expiry and recovery.
+Operator documentation: https://www.coldctl.com/docs. Bundled INSTALL.txt explains installation; BUILD-INFO.json lists available guides.
 ''', encoding='utf-8')
 
 def previous(args):

@@ -57,6 +57,25 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.version(tag)
 
+    def test_release_notes_use_offline_registry_for_prereleases(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public_root = root / 'root.json'
+            public_root.write_text('{}')
+            for version in ('1.2.3', '1.2.3-rc.1'):
+                args = argparse.Namespace(tag='v'+version, repo='coldctl/coldctl', out=root/'assets')
+                release.write_notes(args, version, public_root)
+                notes = (root/'release-notes.md').read_text()
+                command = f'coldctl connector install postgres --version {version}'
+                if '-rc.' in version:
+                    self.assertIn(command + ' --file PATH_TO_EXTRACTED_REGISTRY', notes)
+                    self.assertIn('PRERELEASE', notes)
+                else:
+                    self.assertIn(command + '\n', notes)
+                    self.assertNotIn('PATH_TO_EXTRACTED_REGISTRY', notes)
+                self.assertNotIn('See RELEASING.md', notes)
+
     def test_publish_refuses_existing_release_before_mutation(self):
         import argparse
         args = argparse.Namespace(tag='v1.2.3', repo='coldctl/coldctl')

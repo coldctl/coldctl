@@ -18,12 +18,12 @@ and local, customer-owned S3-compatible, or Azure Blob archive storage. See [clo
 
 This is an active-development release candidate. Verified PostgreSQL, MySQL and MongoDB source deletion
 is opt-in. General archive querying and mutable-source snapshot consistency are not implemented. Production
-qualification remains in progress. See [distribution and supported limits](RELEASING.md).
+qualification remains in progress. See [distribution](#distribution).
 
 ## Get started
 
-Download a published Windows or Linux binary from [GitHub Releases](https://github.com/coldctl/coldctl/releases).
-See [installation and verification](RELEASING.md). Alternatively, build from source
+Once a release is published, download a Windows or Linux binary from [GitHub Releases](https://github.com/coldctl/coldctl/releases).
+See [installation and verification](#distribution). Alternatively, build from source
 with Rust and the platform's native build prerequisites:
 
 ```bash
@@ -43,12 +43,48 @@ The Windows executable is `coldctl.exe`. SQLite is bundled. Use
 credentials through environment references and start with a bounded trial on
 stable data; the [cloud documentation](https://www.coldctl.com/docs) covers workflows.
 
+## Distribution
+
+The base agent and PostgreSQL, MySQL and MongoDB connectors ship separately.
+Supported package targets are Windows x64 and Linux x64 (Ubuntu 24.04 baseline;
+older glibc distributions are not yet qualified).
+
+Before installing a release, follow its release notes to verify the GitHub
+attestation and SHA-256 checksum. Extract the base agent into a version-specific
+directory, add it to PATH, then run `coldctl --version`, `coldctl init` and
+`coldctl status`. Bootstrap connector trust using the exact root fingerprint in
+the release notes, then install only the database connectors you need.
+Prereleases use their own signed offline `connector-registry.zip` and an isolated
+`--data-dir`; follow that release's offline installation command.
+
+For maintainers, run **distribution check (no publication)** from GitHub Actions
+after pushing the changes. It runs the reusable CI checks and builds the base
+agent and all three separate connectors on Windows and Linux. Download the
+`qualification-<commit>-<target>` artifacts from the workflow run within 14 days.
+These are unsigned qualification packages; they are not a published release or
+an installable signed connector registry.
+
+The release workflow handles version tags matching `Cargo.toml` (`v<version>`).
+Before the first release, configure the `release` GitHub environment with the
+`COLDCTL_TUF_ONLINE_KEY` secret corresponding to the existing `release/root.json`,
+and review environment approval rules and repository Actions permissions.
+Keep offline root keys private and preserve the existing trust root.
+Run qualification first, then create the chosen release tag when ready to publish.
+
+Packages always include the executable, license, README, lockfile, `INSTALL.txt`
+and `BUILD-INFO.json`. Operator guides temporarily maintained outside this
+repository are optional; the build inventory lists which guides are included or
+omitted. Packaging never reads the external documentation directory. Current
+operator instructions are available in the [online documentation](https://www.coldctl.com/docs).
+Stop workers and back up state before upgrading; rollback requires a matching
+state backup rather than running an older binary against upgraded state.
+
 ## Documentation
 
 - [Local and customer-owned S3 destinations](SINKS.md)
 - [Long-running archival scheduler](SCHEDULER.md)
 - [Verified source deletion](DELETION.md)
-- [GitHub downloads, connector signing and release procedure](RELEASING.md)
+- [GitHub downloads, connector signing and release procedure](#distribution)
 - [Cloud documentation and command reference](https://www.coldctl.com/docs)
 
 The agent is a Cargo workspace: `coldctl` is the CLI, `coldctl-core` owns local

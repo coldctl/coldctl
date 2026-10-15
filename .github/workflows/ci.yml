@@ -41,6 +41,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: python scripts/check_connector_dependencies.py
       - run: python scripts/package.py --check-inputs
+      - run: python scripts/test_package.py
       - run: python scripts/test_release.py
       - run: cargo build --locked -p coldctl
       - run: python scripts/test-background-sync.py
