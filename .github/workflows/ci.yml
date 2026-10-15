@@ -19,7 +19,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.88.0
       COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
@@ -66,7 +66,7 @@ jobs:
       COLDCTL_TEST_ROLE_PASSWORD: coldctl_test_role_password
       PGPASSWORD: disposable_ci_password
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -97,7 +97,7 @@ jobs:
       COLDCTL_TEST_MYSQL_RESTORE_URL: mysql://root:coldctl_disposable_mysql_phase4@localhost:3306/coldctl_test_restore?sslmode=require
       COLDCTL_TEST_MYSQL_ROLE_PASSWORD: coldctl_mysql_role_test
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -118,7 +118,7 @@ jobs:
       COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
       COLDCTL_TEST_MONGODB_PASSWORD: coldctl_mongodb_fixture_only
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -147,7 +147,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: coldctl_fixture_only
       COLDCTL_TEST_S3_ENDPOINT: http://127.0.0.1:19000
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -169,7 +169,7 @@ jobs:
       AZURE_STORAGE_ACCOUNT_KEY: Y29sZGN0bC1henVyaXRlLWZpeHR1cmUta2V5LW9ubHk=
       COLDCTL_TEST_AZURE_ENDPOINT: http://127.0.0.1:11000/coldctltest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -184,7 +184,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
@@ -215,7 +215,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.88.0
       COLDCTL_ALLOW_UNVERIFIED_CONNECTOR: "1"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal
