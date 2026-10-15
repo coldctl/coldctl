@@ -143,11 +143,22 @@ async fn archive_exports_multiple_batches_preserves_rows_and_records_failures() 
     let mut blocked = options();
     blocked.execution.lock_timeout_ms = 50;
     blocked.execution.query_timeout_ms = 500;
-    let started = std::time::Instant::now();
-    let blocked_result = executor::run(&paths, "orders", blocked).await;
+    // Includes native connector launch and executable hashing. Database timeout
+    // settings are checked independently in the connector integration tests.
+    let blocked_result = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        executor::run(&paths, "orders", blocked),
+    )
+    .await;
     client.batch_execute("ROLLBACK").await.unwrap();
-    assert!(blocked_result.is_err());
-    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let error = blocked_result
+        .expect("blocked archive exceeded its end-to-end deadline")
+        .unwrap_err();
+    assert_eq!(
+        error.failure().category,
+        coldctl_core::error::FailureCategory::Timeout,
+        "expected a database timeout, got {error}"
+    );
     assert!(manifest.plan.safety.is_some());
     let destination =
         coldctl_core::destination::local::LocalDestination::new(root.clone()).unwrap();

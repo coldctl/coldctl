@@ -425,3 +425,84 @@ pub(crate) async fn validate_signature(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires COLDCTL_TEST_POSTGRES_URL pointing to a disposable PostgreSQL database"]
+    async fn configured_database_timeouts_apply_after_connection_startup() {
+        let connection = coldctl_core::source::SourceConnection::from_url_env(
+            "COLDCTL_TEST_POSTGRES_URL".into(),
+        )
+        .unwrap()
+        .resolve()
+        .unwrap();
+        let holder = PostgresSource::new(connection.clone())
+            .connect()
+            .await
+            .unwrap();
+        let mut reader = PostgresArchive::connect(connection).await.unwrap();
+        reader
+            .configure_timeouts(&coldctl_core::archive::controls::ExecutionControls {
+                lock_timeout_ms: 50,
+                query_timeout_ms: 500,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let settings = reader
+            .session
+            .client
+            .query_one(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.get::<_, String>(0), "50ms");
+        assert_eq!(settings.get::<_, String>(1), "500ms");
+
+        // A unique advisory lock exercises PostgreSQL's lock deadline without
+        // creating tables or including connector startup in the measurement.
+        let pid: i32 = holder
+            .client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let key = (0x4343544C_i64 << 32) | i64::from(pid);
+        holder
+            .client
+            .query_one("SELECT pg_advisory_lock($1)", &[&key])
+            .await
+            .unwrap();
+        let blocked = tokio::time::timeout(
+            Duration::from_secs(3),
+            reader
+                .session
+                .client
+                .query_one("SELECT pg_advisory_xact_lock($1)", &[&key]),
+        )
+        .await;
+        holder
+            .client
+            .query_one("SELECT pg_advisory_unlock($1)", &[&key])
+            .await
+            .unwrap();
+        let error = blocked
+            .expect("lock timeout did not terminate the query")
+            .unwrap_err();
+        assert_eq!(error.code().map(|code| code.code()), Some("55P03"));
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            reader.session.client.query_one("SELECT pg_sleep(5)", &[]),
+        )
+        .await
+        .expect("statement timeout did not terminate the query")
+        .unwrap_err();
+        assert_eq!(error.code().map(|code| code.code()), Some("57014"));
+    }
+}
