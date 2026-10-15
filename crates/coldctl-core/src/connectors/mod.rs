@@ -516,6 +516,13 @@ fn references(paths: &StatePaths, p: &Package) -> Result<Vec<String>> {
         .collect())
 }
 pub fn list(paths: &StatePaths) -> Result<Vec<Installed>> {
+    list_inventory(paths, true)
+}
+/// Inventory without loading every archived job solely to calculate removal references.
+pub fn inventory(paths: &StatePaths) -> Result<Vec<Installed>> {
+    list_inventory(paths, false)
+}
+fn list_inventory(paths: &StatePaths, include_references: bool) -> Result<Vec<Installed>> {
     let store = Store::open(paths)?;
     let raw:Vec<(String,bool)>=store.db.prepare("SELECT p.manifest,EXISTS(SELECT 1 FROM defaults d WHERE d.id=p.id AND d.digest=p.digest) FROM packages p WHERE p.installed=1 ORDER BY p.id,p.version").map_err(sql)?.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?.collect::<std::result::Result<_,_>>().map_err(sql)?;
     raw.into_iter()
@@ -525,7 +532,11 @@ pub fn list(paths: &StatePaths) -> Result<Vec<Installed>> {
             Ok(Installed {
                 revoked: store.revoked(package.pin())?,
                 healthy: verify_files(&store, &package).is_ok(),
-                referenced_jobs: references(paths, &package)?,
+                referenced_jobs: if include_references {
+                    references(paths, &package)?
+                } else {
+                    Vec::new()
+                },
                 package,
                 active,
             })

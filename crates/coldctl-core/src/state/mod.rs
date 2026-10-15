@@ -1,6 +1,6 @@
 pub mod archive;
 pub mod backup;
-mod database;
+pub(crate) mod database;
 pub mod deletion;
 pub mod destinations;
 mod installation;

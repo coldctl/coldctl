@@ -28,6 +28,7 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] => Ok(14),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] => Ok(15),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] => Ok(16),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] => Ok(17),
         _ => Err(Error::InvalidState(
             "unsupported migration history; use a compatible Coldctl version".into(),
         )),
@@ -177,6 +178,15 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
             .map_err(sql_error)?;
         conn.execute(
             "INSERT INTO schema_migrations VALUES(16,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 16 {
+        conn.execute_batch(include_str!("../../migrations/0017_monitoring.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(17,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

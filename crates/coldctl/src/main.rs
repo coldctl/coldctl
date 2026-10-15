@@ -35,6 +35,9 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Some(Commands::Protection(args)) => {
+            commands::protection::run(args, &StatePaths::resolve(cli.data_dir.as_deref())?)?
+        }
         Some(Commands::Connector(args)) => {
             commands::connector::run(args, &StatePaths::resolve(cli.data_dir.as_deref())?).await?
         }

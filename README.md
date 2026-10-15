@@ -5,7 +5,7 @@ and retrieve historical data while keeping storage and execution on your infrast
 
 ColdCTL is designed to support multiple database engines and storage destinations.
 The current agent supports optional **PostgreSQL, MySQL and MongoDB connectors**
-and local, customer-owned S3-compatible, or Azure Blob archive storage. See [destination setup](SINKS.md).
+and local, customer-owned S3-compatible, or Azure Blob archive storage. See [cloud storage authentication](CLOUD_AUTH.md) for AWS roles, Azure managed identity, and a remote trial checklist.
 
 ## Current capabilities
 
@@ -81,3 +81,8 @@ privileges and verification](RELEASING.md). PostgreSQL remains compatible.
 MongoDB 8.0 replica-set support is available as the separate
 `coldctl-connector-mongodb` executable, with raw BSON archives and transactional
 restore. See [MongoDB setup, limits and qualification](RELEASING.md).
+
+Operational monitoring: see [metrics, durable failures and alert hooks](MONITORING.md).
+`agent sync --watch` enables opt-in background metadata uploads. See [Background Cloud sync](BACKGROUND_SYNC.md) for service setup, retries, limits and status.
+
+Production protection: see [PRODUCTION_PROTECTION.md](PRODUCTION_PROTECTION.md) for source-scoped operating windows, monitored lag/load admission and adaptive delays. Read-only source/archive/gateway comparisons are documented in [SHADOW_VALIDATION.md](SHADOW_VALIDATION.md).

@@ -8,6 +8,7 @@ pub mod destination;
 pub mod init;
 pub mod jobs;
 pub mod policy;
+pub mod protection;
 pub mod scheduler;
 pub mod source;
 pub mod state;
@@ -15,6 +16,8 @@ pub mod status;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Configure source-scoped production admission and monitoring thresholds.
+    Protection(protection::Arguments),
     /// Install and manage independently signed connector packages.
     Connector(connector::Args),
     /// Initialize local state (safe to run repeatedly).
@@ -35,3 +38,6 @@ pub enum Commands {
     #[command(subcommand)]
     Agent(agent::Command),
 }
+
+mod cloud_sync;
+pub mod monitor;

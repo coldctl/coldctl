@@ -18,6 +18,8 @@ pub struct S3Config {
     pub access_key_env: String,
     pub secret_key_env: String,
     pub session_token_env: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub role_auth: bool,
     pub allow_http: bool,
 }
 fn bad() -> Error {
@@ -50,6 +52,12 @@ impl S3Config {
                 return Err(bad());
             }
         }
+        if self.role_auth && (self.endpoint.is_some() || self.allow_http) {
+            return Err(bad());
+        }
+        if self.role_auth && self.session_token_env.is_some() {
+            return Err(bad());
+        }
         if let Some(endpoint) = &self.endpoint {
             let url = url::Url::parse(endpoint).map_err(|_| bad())?;
             let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -70,7 +78,24 @@ impl S3Config {
         Ok(())
     }
     pub(super) fn build(&self) -> Result<object_store::aws::AmazonS3, Error> {
+        self.builder()?.build().map_err(network)
+    }
+    pub(super) fn builder(&self) -> Result<AmazonS3Builder, Error> {
         self.validate()?;
+        if self.role_auth {
+            match (
+                std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE"),
+                std::env::var("AWS_ROLE_ARN"),
+            ) {
+                (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => {}
+                (Ok(file), Ok(role)) if !file.is_empty() && !role.is_empty() => {}
+                _ => {
+                    return Err(Error::DestinationConfiguration(
+                        "AWS web identity requires both a token file and role ARN",
+                    ));
+                }
+            }
+        }
         let credential = |name: &str| {
             std::env::var(name).ok().filter(|v| !v.is_empty()).ok_or(
                 Error::DestinationConfiguration(
@@ -81,8 +106,6 @@ impl S3Config {
         let mut builder = AmazonS3Builder::new()
             .with_bucket_name(&self.bucket)
             .with_region(&self.region)
-            .with_access_key_id(credential(&self.access_key_env)?)
-            .with_secret_access_key(credential(&self.secret_key_env)?)
             .with_virtual_hosted_style_request(false)
             .with_conditional_put(S3ConditionalPut::ETagMatch)
             .with_client_options(
@@ -99,10 +122,15 @@ impl S3Config {
         if let Some(endpoint) = &self.endpoint {
             builder = builder.with_endpoint(endpoint);
         }
-        if let Some(name) = &self.session_token_env {
-            builder = builder.with_token(credential(name)?);
+        if !self.role_auth {
+            builder = builder
+                .with_access_key_id(credential(&self.access_key_env)?)
+                .with_secret_access_key(credential(&self.secret_key_env)?);
+            if let Some(name) = &self.session_token_env {
+                builder = builder.with_token(credential(name)?);
+            }
         }
-        builder.build().map_err(network)
+        Ok(builder)
     }
     pub(super) fn key(&self, key: &str) -> Result<ObjectPath, Error> {
         if !key_valid(key) {
@@ -127,6 +155,7 @@ mod tests {
     use object_store::ObjectStore;
     fn config() -> S3Config {
         S3Config {
+            role_auth: false,
             bucket: "coldctl-test".into(),
             region: "us-east-1".into(),
             prefix: format!("tests/{}", uuid::Uuid::new_v4()),
@@ -136,6 +165,26 @@ mod tests {
             session_token_env: None,
             allow_http: true,
         }
+    }
+    #[test]
+    fn cloud_auth_is_opt_in_and_cannot_send_credentials_to_custom_endpoints() {
+        let original = config();
+        let serialized = serde_json::to_value(&original).unwrap();
+        assert!(serialized.get("role_auth").is_none());
+        let mut value: S3Config = serde_json::from_value(serialized).unwrap();
+        assert!(!value.role_auth);
+        value.role_auth = true;
+        assert!(value.validate().is_err());
+        value.endpoint = None;
+        value.allow_http = false;
+        value.validate().unwrap();
+        // Constructing a cloud client must not resolve the static credential references.
+        value.builder().unwrap();
+        let roundtrip: S3Config =
+            serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        assert!(roundtrip.role_auth);
+        value.endpoint = Some("https://attacker.example".into());
+        assert!(value.validate().is_err());
     }
     #[test]
     fn endpoints_keys_and_secret_references_are_validated_without_credentials() {

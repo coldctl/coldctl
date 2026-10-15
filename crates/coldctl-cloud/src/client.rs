@@ -63,6 +63,13 @@ pub struct Job {
 /// Explicit allowlist: never serialize connection configuration, plans, predicates,
 /// row values, file paths, keys, raw errors or environment references.
 pub fn collect(paths: &StatePaths, version: &str) -> Result<Snapshot, Box<dyn std::error::Error>> {
+    collect_config(paths, version, true)
+}
+pub fn collect_config(
+    paths: &StatePaths,
+    version: &str,
+    include_jobs: bool,
+) -> Result<Snapshot, Box<dyn std::error::Error>> {
     let captured_at_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let installation = state::status(paths)?.ok_or("Run coldctl init first")?;
     let sources = state::sources::list(paths)?
@@ -96,27 +103,31 @@ pub fn collect(paths: &StatePaths, version: &str) -> Result<Snapshot, Box<dyn st
             has_equality_filter: p.config.equals_column.is_some(),
         })
         .collect();
-    let jobs = state::archive::job_list(paths)?
-        .into_iter()
-        .map(|j| Job {
-            id: j.id,
-            policy_name: j.policy_name,
-            source: j.plan.policy.source,
-            destination: j.plan.policy.destination,
-            schema: j.plan.policy.config.schema,
-            table: j.plan.policy.config.table,
-            status: j.status,
-            rows_processed: j.rows_processed,
-            bytes_written: j.bytes_written,
-            objects_created: j.objects_created,
-            started_at: j.started_at,
-            completed_at: j.completed_at,
-            verified_at: j.verified_at,
-            stage: j.progress.as_ref().map(|p| p.stage),
-            observed_at_unix_ms: j.progress.map(|p| p.observed_at_unix_ms),
-            imported: j.imported,
-        })
-        .collect();
+    let jobs = if include_jobs {
+        state::archive::job_list(paths)?
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|j| Job {
+        id: j.id,
+        policy_name: j.policy_name,
+        source: j.plan.policy.source,
+        destination: j.plan.policy.destination,
+        schema: j.plan.policy.config.schema,
+        table: j.plan.policy.config.table,
+        status: j.status,
+        rows_processed: j.rows_processed,
+        bytes_written: j.bytes_written,
+        objects_created: j.objects_created,
+        started_at: j.started_at,
+        completed_at: j.completed_at,
+        verified_at: j.verified_at,
+        stage: j.progress.as_ref().map(|p| p.stage),
+        observed_at_unix_ms: j.progress.map(|p| p.observed_at_unix_ms),
+        imported: j.imported,
+    })
+    .collect();
     Ok(Snapshot {
         schema_version: 1,
         agent_id: installation.id.to_string(),
@@ -143,7 +154,7 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, Box<dyn std::error::Error>
     }
     Ok(bytes)
 }
-fn endpoint(
+pub fn endpoint(
     base: &str,
     allow_local_http: bool,
 ) -> Result<reqwest::Url, Box<dyn std::error::Error>> {
@@ -221,6 +232,7 @@ mod tests {
             "remote",
             &dir.path().join("PRIVATE_STAGING"),
             coldctl_core::destination::s3::S3Config {
+                role_auth: false,
                 bucket: "private-bucket".into(),
                 region: "us-east-1".into(),
                 prefix: "PRIVATE_PREFIX".into(),
@@ -237,6 +249,8 @@ mod tests {
             "azure-remote",
             &dir.path().join("PRIVATE_AZURE_STAGING"),
             coldctl_core::destination::azure::AzureConfig {
+                managed_identity: false,
+                managed_identity_client_id: None,
                 account: "privateazureaccount".into(),
                 container: "private-container".into(),
                 prefix: "PRIVATE_AZURE_PREFIX".into(),

@@ -47,6 +47,8 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store
     let manifest = journal
         .manifest
         .ok_or(Error::Archive("missing archive manifest"))?;
+    crate::protection::authorize_delete(paths, &job, &manifest.sha256)?;
+    crate::protection::admit(paths, &job.plan.policy.source)?;
     let mut progress = store::start(paths, id, &manifest.sha256)?;
     if progress.batches > job.objects_created
         || progress.rows_processed > job.rows_processed
@@ -71,6 +73,7 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store
     }
     // A newer approved connector may add deletion support to old archives. The
     // recorded source identity and schema are checked by that connector per batch.
+    crate::protection::admit(paths, &job.plan.policy.source)?;
     let mut client = launch_in_state(&source.connection, paths, None).await?;
     if !client.hello.features.contains("verified-delete-v1") {
         return Err(Error::Archive(
@@ -92,6 +95,14 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store
         if options.shutdown.requested() || options.max_batches.is_some_and(|n| invocation >= n) {
             break;
         }
+        if let Err(error) =
+            crate::protection::boundary(paths, &job.plan.policy.source, &options.shutdown).await
+        {
+            if crate::protection::is_pause(&error) {
+                break;
+            }
+            return Err(error);
+        }
         let sequence = progress.batches + 1;
         let rows = read_batch(paths, &job, sequence)?;
         let count = rows.len() as u64;
@@ -99,6 +110,13 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store
             && progress.rows_processed + count as i64 != job.rows_processed
         {
             return Err(Error::Archive("deletion row checkpoint mismatch"));
+        }
+        // Archive I/O can outlive a telemetry sample; check again before source mutation.
+        if let Err(error) = crate::protection::admit(paths, &job.plan.policy.source) {
+            if crate::protection::is_pause(&error) {
+                break;
+            }
+            return Err(error);
         }
         let result: DeleteBatchResult = client
             .call(Request::DeleteBatch { rows }, 120_000, true)

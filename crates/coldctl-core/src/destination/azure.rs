@@ -13,6 +13,10 @@ pub struct AzureConfig {
     pub prefix: String,
     pub endpoint: Option<String>,
     pub account_key_env: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed_identity: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_identity_client_id: Option<String>,
     pub allow_http: bool,
 }
 fn bad() -> Error {
@@ -43,6 +47,14 @@ impl AzureConfig {
         {
             return Err(bad());
         }
+        if self.managed_identity && (self.endpoint.is_some() || self.allow_http) {
+            return Err(bad());
+        }
+        if let Some(id) = &self.managed_identity_client_id {
+            if !self.managed_identity || uuid::Uuid::parse_str(id).is_err() {
+                return Err(bad());
+            }
+        }
         if let Some(endpoint) = &self.endpoint {
             let url = url::Url::parse(endpoint).map_err(|_| bad())?;
             let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -65,19 +77,15 @@ impl AzureConfig {
         Ok(())
     }
     pub(super) fn build(&self) -> Result<object_store::azure::MicrosoftAzure, Error> {
+        self.builder()?.build().map_err(network)
+    }
+    pub(super) fn builder(&self) -> Result<MicrosoftAzureBuilder, Error> {
         self.validate()?;
-        let key = std::env::var(&self.account_key_env)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .ok_or(Error::DestinationConfiguration(
-                "Azure account-key environment variable missing or empty",
-            ))?;
         // Do not use SDK emulator mode: it reads an ambient endpoint override. The
         // explicit endpoint below is validated and frozen in the archive plan.
         let mut builder = MicrosoftAzureBuilder::new()
             .with_account(&self.account)
             .with_container_name(&self.container)
-            .with_access_key(key)
             .with_client_options(
                 object_store::ClientOptions::new()
                     .with_allow_http(self.allow_http)
@@ -92,7 +100,20 @@ impl AzureConfig {
         if let Some(endpoint) = &self.endpoint {
             builder = builder.with_endpoint(endpoint.clone());
         }
-        builder.build().map_err(network)
+        if self.managed_identity {
+            if let Some(id) = &self.managed_identity_client_id {
+                builder = builder.with_client_id(id);
+            }
+        } else {
+            let key = std::env::var(&self.account_key_env)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or(Error::DestinationConfiguration(
+                    "Azure account-key environment variable missing or empty",
+                ))?;
+            builder = builder.with_access_key(key);
+        }
+        Ok(builder)
     }
     pub(super) fn key(&self, key: &str) -> Result<ObjectPath, Error> {
         if !key_valid(key) {
@@ -118,6 +139,8 @@ mod tests {
     use object_store::ObjectStore;
     fn config() -> AzureConfig {
         AzureConfig {
+            managed_identity: false,
+            managed_identity_client_id: None,
             account: "coldctltest".into(),
             container: "coldctl-test".into(),
             prefix: format!("tests/{}", uuid::Uuid::new_v4()),
@@ -125,6 +148,26 @@ mod tests {
             account_key_env: "AZURE_STORAGE_ACCOUNT_KEY".into(),
             allow_http: true,
         }
+    }
+    #[test]
+    fn cloud_auth_is_opt_in_and_cannot_send_credentials_to_custom_endpoints() {
+        let original = config();
+        let serialized = serde_json::to_value(&original).unwrap();
+        assert!(serialized.get("managed_identity").is_none());
+        let mut value: AzureConfig = serde_json::from_value(serialized).unwrap();
+        assert!(!value.managed_identity);
+        value.managed_identity = true;
+        assert!(value.validate().is_err());
+        value.endpoint = None;
+        value.allow_http = false;
+        value.validate().unwrap();
+        // Constructing a cloud client must not resolve the static credential references.
+        value.builder().unwrap();
+        let roundtrip: AzureConfig =
+            serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        assert!(roundtrip.managed_identity);
+        value.endpoint = Some("https://attacker.example".into());
+        assert!(value.validate().is_err());
     }
     #[test]
     fn azure_configuration_is_validated_without_credentials() {

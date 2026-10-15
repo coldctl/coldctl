@@ -27,6 +27,7 @@ fn s3_configuration_is_offline_and_persists_only_credential_names() {
         "bucket",
         &root,
         S3Config {
+            role_auth: false,
             bucket: "customer-archive".into(),
             region: "us-east-1".into(),
             prefix: "coldctl".into(),
@@ -151,7 +152,7 @@ fn migration_from_v2_preserves_sources_and_installation() {
     )
     .unwrap();
     let conn = rusqlite::Connection::open(paths.database()).unwrap();
-    conn.execute_batch("DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DROP TABLE destinations; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version >= 3;")
+    conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; DROP TABLE archive_objects; DROP TABLE archive_checkpoints; DROP TABLE jobs; DROP TABLE policies; DROP TABLE destinations; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version >= 3;")
         .unwrap();
     let error = destinations::list(&paths).unwrap_err();
     assert!(error.to_string().contains("coldctl init"));
@@ -166,7 +167,7 @@ fn migration_from_v2_preserves_sources_and_installation() {
         conn.query_row("SELECT count(*) FROM schema_migrations", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
 }
 

@@ -241,3 +241,67 @@ fn help_validation_and_failed_access_have_nonzero_errors() {
     assert!(String::from_utf8_lossy(&failed.stderr).contains("Check disk space"));
     assert_eq!(std::fs::read(file).unwrap(), b"keep");
 }
+
+#[test]
+fn cloud_identity_modes_persist_without_secret_variables() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(run(temp.path(), &["init"]).status.success());
+    for args in [
+        vec![
+            "destination",
+            "add",
+            "s3",
+            "--name",
+            "role",
+            "--bucket",
+            "customer-archive",
+            "--region",
+            "us-east-1",
+            "--role-auth",
+            "--output",
+            "json",
+        ],
+        vec![
+            "destination",
+            "add",
+            "azure",
+            "--name",
+            "identity",
+            "--account",
+            "customeraccount",
+            "--container",
+            "archive",
+            "--managed-identity",
+            "--managed-identity-client-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--output",
+            "json",
+        ],
+    ] {
+        let added = run(temp.path(), &args);
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        let saved: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+        let name = saved["name"].as_str().unwrap();
+        let shown = run(
+            temp.path(),
+            &["destination", "show", name, "--output", "json"],
+        );
+        assert!(shown.status.success());
+        assert_eq!(
+            saved,
+            serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap()
+        );
+        assert_eq!(
+            saved["config"][if name == "role" {
+                "role_auth"
+            } else {
+                "managed_identity"
+            }],
+            true
+        );
+    }
+}

@@ -68,6 +68,7 @@ pub(crate) async fn run_queued(
     controls.minimum_free_bytes = options.minimum_free_bytes;
     controls.validate()?;
     let policy = store::policy_show(paths, name)?;
+    crate::protection::admit(paths, &policy.source)?;
     let _policy_guard = journal::policy_lock(paths, &policy.id)?;
     check_prior_runs(paths, &policy.id, options.allow_repeat)?;
     let source = sources::show(paths, &policy.source)?;
@@ -182,6 +183,7 @@ pub(crate) async fn resume_scheduled(
         verifier::verify_observed(paths, id, observer)?;
         return store::job_show(paths, id);
     }
+    crate::protection::admit(paths, &job.plan.policy.source)?;
     let _policy_guard = journal::policy_lock(paths, &job.plan.policy.id)?;
     if !confirm_original_source {
         return Err(Error::Archive(
@@ -435,6 +437,19 @@ async fn export(
             .await;
             continue;
         }
+        if let Err(error) =
+            crate::protection::boundary(paths, &job.plan.policy.source, shutdown).await
+        {
+            if crate::protection::is_pause(&error) {
+                journal::pause(
+                    paths,
+                    id,
+                    "production protection paused; inspect protection status",
+                )?;
+                return Ok(());
+            }
+            return Err(error);
+        }
         let remaining = controls
             .max_rows
             .map(|limit| limit - (job.rows_processed - initial_rows) as u64);
@@ -628,6 +643,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
         state::initialize(&paths, "test").unwrap();
+        crate::state::sources::add(
+            &paths,
+            "source",
+            crate::source::SourceConnection::from_url_env("FIXTURE_UNUSED".into()).unwrap(),
+        )
+        .unwrap();
         let plan = ArchivePlan {
             connector_pin: None,
             safety: None,
@@ -671,6 +692,46 @@ mod tests {
         )
         .unwrap();
         (temp, paths, job)
+    }
+    #[tokio::test]
+    async fn protection_pauses_before_source_read_and_resumes_same_job() {
+        let (_temp, paths, job) = fixture();
+        crate::protection::set(
+            &paths,
+            "source",
+            crate::protection::Policy {
+                max_replica_lag_ms: Some(2000),
+                sample_max_age_seconds: 30,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut source = reader();
+        execute(&paths, &job.id, &mut source).await.unwrap();
+        assert!(source.calls.is_empty());
+        assert_eq!(
+            store::job_show(&paths, &job.id).unwrap().status,
+            store::JobStatus::Paused
+        );
+        let id = crate::state::sources::show(&paths, "source").unwrap().id;
+        crate::protection::sample(
+            &paths,
+            "source",
+            crate::protection::Sample {
+                source_id: id,
+                observed_at_unix_ms: crate::protection::now_ms(),
+                replica_lag_ms: Some(0),
+                cpu_percent: None,
+                lock_waiters: None,
+            },
+        )
+        .unwrap();
+        journal::restart(&paths, &job.id).unwrap();
+        execute(&paths, &job.id, &mut source).await.unwrap();
+        assert_eq!(
+            store::job_show(&paths, &job.id).unwrap().status,
+            store::JobStatus::Completed
+        );
     }
     struct Reader {
         calls: Vec<(Option<i64>, i64)>,
@@ -725,6 +786,8 @@ mod tests {
             let mut plan = old.plan;
             plan.destination_config = Some(if azure {
                 DestinationConfig::Azure(AzureConfig {
+                    managed_identity: false,
+                    managed_identity_client_id: None,
                     account: "coldctltest".into(),
                     container: "coldctl-test".into(),
                     prefix: format!("tests/{}", uuid::Uuid::new_v4()),
@@ -734,6 +797,7 @@ mod tests {
                 })
             } else {
                 DestinationConfig::S3(S3Config {
+                    role_auth: false,
                     bucket: "coldctl-test".into(),
                     region: "us-east-1".into(),
                     prefix: format!("tests/{}", uuid::Uuid::new_v4()),
@@ -955,7 +1019,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -1054,7 +1118,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -1235,7 +1299,7 @@ mod tests {
         .unwrap();
         assert!(start.elapsed() >= Duration::from_millis(120));
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
         state::initialize(&paths, "upgrade").unwrap();
         verifier::verify(&paths, &job.id).unwrap();
         assert_eq!(store::job_show(&paths, &job.id).unwrap().rows_processed, 3);
@@ -1284,7 +1348,7 @@ mod tests {
         let old = include_str!("../../migrations/0004_archive.sql");
         let start = old.find("CREATE TABLE jobs").unwrap();
         conn.execute_batch(&old[start..]).unwrap();
-        conn.execute_batch("INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
         state::initialize(&paths, "upgraded").unwrap();
         assert_eq!(state::status(&paths).unwrap(), installation);
         let preserved = store::job_show(&paths, &job.id).unwrap();

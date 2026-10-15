@@ -328,6 +328,7 @@ mod tests {
             "s3",
             &temp.path().join("staging"),
             S3Config {
+                role_auth: false,
                 bucket: "test-archives".into(),
                 region: "us-east-1".into(),
                 prefix: "test".into(),

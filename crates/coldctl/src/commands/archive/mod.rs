@@ -18,6 +18,31 @@ pub struct Args {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Compare a completed archive with retained source rows and optional gateway ID lookups. Never deletes.
+    Shadow {
+        /// Completed archive job ID.
+        id: String,
+        #[arg(long, required = true)]
+        /// Confirm the original source still retains the archived records.
+        confirm_original_source: bool,
+        #[arg(long)]
+        /// Stop after this many batches; a partial report cannot pass.
+        max_batches: Option<u64>,
+        #[arg(long, requires_all=["dataset_id","token_env"])]
+        /// Gateway HTTPS origin (HTTP is allowed only on loopback).
+        gateway_url: Option<String>,
+        #[arg(long, requires = "gateway_url")]
+        /// Gateway dataset ID containing this archive.
+        dataset_id: Option<String>,
+        #[arg(long, requires = "gateway_url")]
+        /// Environment variable containing the gateway bearer token.
+        token_env: Option<String>,
+    },
+    /// Show up to 100 latest durable shadow reports; interrupted runs remain running/unfinalized.
+    ShadowReports {
+        /// Completed archive job ID.
+        id: String,
+    },
     /// Delete unchanged source records only after verifying their completed archive.
     Delete {
         id: String,
@@ -96,6 +121,37 @@ pub enum Command {
 }
 pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
+        Command::Shadow {
+            id,
+            confirm_original_source,
+            max_batches,
+            gateway_url,
+            dataset_id,
+            token_env,
+        } => {
+            let signals = crate::execution::Signals::install()?;
+            let report = coldctl_core::archive::shadow::run(
+                paths,
+                &id,
+                coldctl_core::archive::shadow::Options {
+                    confirm_original_source,
+                    max_batches,
+                    gateway_url,
+                    dataset_id,
+                    token_env,
+                    shutdown: signals.shutdown.clone(),
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.status != "passed" {
+                return Err("shadow validation did not pass; source data was not deleted".into());
+            }
+        }
+        Command::ShadowReports { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&coldctl_core::archive::shadow::reports(paths, &id)?)?
+        ),
         Command::Delete {
             id,
             confirm_delete,

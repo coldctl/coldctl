@@ -27,6 +27,9 @@ pub struct Args {
     /// Permit HTTP only for an explicitly configured loopback emulator.
     #[arg(long)]
     allow_http: bool,
+    /// Use automatically refreshed cloud identity credentials (standard endpoints only).
+    #[arg(long)]
+    role_auth: bool,
 }
 pub fn run(
     args: Args,
@@ -41,6 +44,7 @@ pub fn run(
         &args.name,
         &staging,
         S3Config {
+            role_auth: args.role_auth,
             bucket: args.bucket,
             region: args.region,
             prefix: args.prefix,

@@ -11,6 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+serde = "1"
+axum = "0.8"
+anyhow = "1"
+subtle = "2"
 clap.workspace = true
 coldctl-core.workspace = true
 coldctl-cloud.workspace = true

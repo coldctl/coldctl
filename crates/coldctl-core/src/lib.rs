@@ -14,3 +14,10 @@ mod fs_security;
 pub mod connector_contract;
 
 pub mod connectors;
+
+pub mod cloud_lifecycle;
+pub mod cloud_sync;
+pub mod monitoring;
+pub mod monitoring_agent;
+
+pub mod protection;

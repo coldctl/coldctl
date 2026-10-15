@@ -23,6 +23,12 @@ pub struct Args {
     /// Permit HTTP only for an explicitly configured loopback emulator.
     #[arg(long)]
     allow_http: bool,
+    /// Use automatically refreshed cloud identity credentials (standard endpoints only).
+    #[arg(long)]
+    managed_identity: bool,
+    /// Optional user-assigned Azure identity client UUID.
+    #[arg(long, requires = "managed_identity")]
+    managed_identity_client_id: Option<String>,
 }
 pub fn run(
     args: Args,
@@ -37,6 +43,8 @@ pub fn run(
         &args.name,
         &staging,
         AzureConfig {
+            managed_identity: args.managed_identity,
+            managed_identity_client_id: args.managed_identity_client_id,
             account: args.account,
             container: args.container,
             prefix: args.prefix,

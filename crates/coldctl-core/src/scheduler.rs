@@ -42,24 +42,38 @@ impl Worker {
             result = if saved.status == "cancelled" {
                 Ok(JobStatus::Cancelled)
             } else if let Some(id) = &saved.job_id {
-                crate::archive::deletion::run(
+                match crate::archive::automatic_shadow::prepare(
                     paths,
                     id,
-                    crate::archive::deletion::Options {
-                        confirm_delete: true,
-                        confirm_original_source: entry.options.confirm_original_source,
-                        max_batches: Some(1),
-                        shutdown,
-                    },
+                    &entry.id,
+                    shutdown.clone(),
                 )
                 .await
-                .map(|p| {
-                    if p.completed {
-                        JobStatus::Completed
-                    } else {
-                        JobStatus::Paused
+                {
+                    Err(error) => Err(error),
+                    Ok(()) if store::show(paths, &entry.id)?.status == "cancelled" => {
+                        Ok(JobStatus::Cancelled)
                     }
-                })
+                    Ok(()) if shutdown.requested() => Ok(JobStatus::Paused),
+                    Ok(()) => crate::archive::deletion::run(
+                        paths,
+                        id,
+                        crate::archive::deletion::Options {
+                            confirm_delete: true,
+                            confirm_original_source: entry.options.confirm_original_source,
+                            max_batches: Some(1),
+                            shutdown,
+                        },
+                    )
+                    .await
+                    .map(|p| {
+                        if p.completed {
+                            JobStatus::Completed
+                        } else {
+                            JobStatus::Paused
+                        }
+                    }),
+                }
             } else {
                 Err(Error::Archive(
                     "completed queue entry is missing its archive job",
@@ -146,6 +160,9 @@ fn outcome(
             entry.failures,
             Some("archive failed; inspect the job".into()),
         ),
+        Err(error) if crate::protection::is_pause(&error) => {
+            ("pending", 30, entry.failures, Some(error.failure().message))
+        }
         Err(error) => {
             let failure = error.failure();
             let failures = entry.failures.saturating_add(1);
@@ -380,6 +397,28 @@ mod tests {
         entry.options.max_retries = 100;
         entry.failures = 99;
         assert_eq!(outcome(&entry, transient()).1, 3600);
+        crate::protection::set(
+            &paths,
+            "source",
+            crate::protection::Policy {
+                max_replica_lag_ms: Some(2000),
+                sample_max_age_seconds: 30,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let held = outcome(
+            &entry,
+            crate::protection::admit(&paths, "source").map(|_| JobStatus::Completed),
+        );
+        assert_eq!((held.0, held.1, held.2), ("pending", 30, 99));
+        let held = outcome(
+            &entry,
+            Err(Error::Archive(
+                "deletion requires a recent complete passing gateway shadow report for this manifest",
+            )),
+        );
+        assert_eq!((held.0, held.1, held.2), ("pending", 30, 99));
         let permanent = outcome(&entry, Err(Error::InvalidState("secret".into())));
         assert_eq!(permanent.0, "failed");
         assert!(!permanent.3.unwrap().contains("secret"));

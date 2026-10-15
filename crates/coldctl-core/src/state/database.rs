@@ -21,7 +21,7 @@ pub(super) fn at_path(error: Error, paths: &StatePaths) -> Error {
 }
 
 /// Source commands never implicitly create an installation or upgrade its schema.
-pub(super) fn open_initialized(paths: &StatePaths, writable: bool) -> Result<Connection, Error> {
+pub(crate) fn open_initialized(paths: &StatePaths, writable: bool) -> Result<Connection, Error> {
     if status(paths)?.is_none() {
         return Err(Error::NotInitialized);
     }

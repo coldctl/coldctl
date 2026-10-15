@@ -59,3 +59,6 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod cloud_auth_tests;

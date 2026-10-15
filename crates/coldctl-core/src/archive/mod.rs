@@ -10,3 +10,7 @@ pub mod recovery;
 pub mod verifier;
 
 pub mod key;
+
+pub mod shadow;
+
+pub mod automatic_shadow;

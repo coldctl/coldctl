@@ -12,16 +12,24 @@ import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_DOCS = ["LICENSE", "README.md", "Cargo.lock", "RELEASING.md", "SINKS.md", "SCHEDULER.md", "DELETION.md", "CLOUD_AUTH.md", "MONITORING.md", "BACKGROUND_SYNC.md", "RELEASE_QUALIFICATION.md", "PRODUCTION_PROTECTION.md", "SHADOW_VALIDATION.md"]
 
 def run(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
 
 def main():
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument("--target", required=True, choices=["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"])
+    parser.add_argument("--check-inputs", action="store_true", help="Validate package documentation without building or publishing")
+    parser.add_argument("--target", required=False, choices=["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"])
     parser.add_argument("--require-clean", action="store_true")
     parser.add_argument("--component", choices=["coldctl", "coldctl-connector-postgres", "coldctl-connector-mysql", "coldctl-connector-mongodb"], default="coldctl")
     args = parser.parse_args()
+    missing = [name for name in PACKAGE_DOCS if not (ROOT/name).is_file()]
+    if missing: raise SystemExit("Missing package inputs: " + ", ".join(missing))
+    if args.check_inputs:
+        print("Package inputs verified; no build or publication performed")
+        return
+    if args.target is None: parser.error("--target is required for packaging")
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     dirty = bool(run("git", "status", "--porcelain"))
     if args.require_clean and dirty:
@@ -49,13 +57,13 @@ def main():
         folder = Path(tmp) / name
         folder.mkdir()
         shutil.copy2(binary, folder / binary_name)
-        for path in ["LICENSE", "README.md", "Cargo.lock", "RELEASING.md", "SINKS.md"]:
+        for path in PACKAGE_DOCS:
             shutil.copy2(ROOT / path, folder / path)
         info = {"component": args.component, "version": version, "target": args.target, "commit": run("git", "rev-parse", "HEAD"),
                 "dirty": dirty, "rustc": run("rustc", "--version"), "cargo": run("cargo", "--version"),
                 "lockfile_sha256": hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest(),
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 16, "manifest_formats": [2,3,4]}
+                "github_run_id": os.environ.get("GITHUB_RUN_ID"), "state_schema": 17, "manifest_formats": [2,3,4]}
         (folder / "BUILD-INFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
         if extension == ".zip":
             with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as z:
