@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import zipfile
@@ -137,6 +138,9 @@ def prepare(args):
         shutil.copyfile(root, signed / 'metadata' / f'{root_version}.root.json')
         # Verify the exact output before it becomes release material.
         cargo('verify_connector_registry', root, signed, work / 'checked')
+        # Exercise the actual packaged agent against the publisher's signed output.
+        # Signature verification alone does not prove the installer accepts it.
+        smoke_registry(out, release_version, root, signed, work)
         with zipfile.ZipFile(out / 'connector-registry.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
             for category in ('metadata', 'targets'):
                 for source in sorted((signed / category).iterdir()):
@@ -148,6 +152,26 @@ def prepare(args):
     (out / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     (out / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(out.iterdir())), encoding='ascii')
     write_notes(args, release_version, root)
+
+
+def smoke_registry(out, release_version, root, signed, work):
+    stem = f'coldctl-{release_version}-x86_64-unknown-linux-gnu'
+    binary = work / 'coldctl'
+    with tarfile.open(out / (stem + '.tar.gz')) as archive:
+        member = archive.getmember(stem + '/coldctl')
+        if not member.isfile():
+            raise ValueError('Packaged agent must be a regular file')
+        with archive.extractfile(member) as source, binary.open('xb') as destination:
+            shutil.copyfileobj(source, destination)
+    binary.chmod(0o700)
+    command = [str(binary), '--data-dir', str(work / 'install-smoke-state')]
+    subprocess.run([*command, 'init'], check=True, timeout=60)
+    subprocess.run([*command, 'connector', 'registry', '--url', str(signed),
+                    '--root', str(root), '--root-sha256', digest(root)], check=True, timeout=60)
+    for engine in ('postgres', 'mysql', 'mongodb'):
+        subprocess.run([*command, 'connector', 'install', engine, '--version', release_version,
+                        '--file', str(signed)], check=True, timeout=300)
+    subprocess.run([*command, 'connector', 'doctor'], check=True, timeout=60)
 
 
 def write_notes(args, release_version, root):
@@ -212,7 +236,14 @@ def publish(args):
     files = sorted(args.out.iterdir())
     for offset in range(0, len(files), 20):
         subprocess.run(['gh', 'release', 'upload', args.tag, '--repo', args.repo, *map(str, files[offset:offset+20])], check=True)
-    uploaded = json.loads(command('gh', 'api', f'repos/{args.repo}/releases/tags/{args.tag}'))['assets']
+    # The tag endpoint excludes drafts. Resolve the draft through the authenticated
+    # release list, then paginate its assets by release ID.
+    pages = json.loads(command('gh', 'api', '--paginate', '--slurp', f'repos/{args.repo}/releases?per_page=100'))
+    drafts = [r for page in pages for r in page if r['tag_name'] == args.tag]
+    if len(drafts) != 1 or not drafts[0]['draft']:
+        raise ValueError('Expected exactly one unpublished draft; refusing publication')
+    asset_pages = json.loads(command('gh', 'api', '--paginate', '--slurp', f"repos/{args.repo}/releases/{drafts[0]['id']}/assets?per_page=100"))
+    uploaded = [asset for page in asset_pages for asset in page]
     if {a['name']: a['size'] for a in uploaded} != {p.name: p.stat().st_size for p in files}:
         raise ValueError('Uploaded asset inventory mismatch; release remains a draft')
     if any(a.get('digest') != 'sha256:' + digest(args.out / a['name']) for a in uploaded):

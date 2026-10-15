@@ -13,15 +13,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/coldctl/coldctl"
 homepage = "https://www.coldctl.com"
 
 [workspace.dependencies]
-coldctl-core = { version = "0.1.1", path = "crates/coldctl-core" }
-coldctl-cloud = { version = "0.1.1", path = "crates/coldctl-cloud" }
+coldctl-core = { version = "0.1.2", path = "crates/coldctl-core" }
+coldctl-cloud = { version = "0.1.2", path = "crates/coldctl-cloud" }
 clap = { version = "4", features = ["derive"] }
 
-coldctl-connector-protocol = { version = "0.1.1", path = "crates/coldctl-connector-protocol" }
+coldctl-connector-protocol = { version = "0.1.2", path = "crates/coldctl-connector-protocol" }

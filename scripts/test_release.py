@@ -2,6 +2,9 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import tarfile
+import io
+import subprocess
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -94,7 +97,8 @@ class ReleaseTests(unittest.TestCase):
             for valid in (False, True):
                 uploaded = {'assets': [{'name': asset.name, 'size': asset.stat().st_size,
                                         'digest': 'sha256:' + (release.digest(asset) if valid else '0'*64)}]}
-                with patch.object(release, 'version'), patch.object(release, 'command', side_effect=['[[]]', json.dumps(uploaded)]), patch.object(release.subprocess, 'run') as run:
+                drafts = [[{'tag_name': args.tag, 'draft': True, 'id': 123}]]
+                with patch.object(release, 'version'), patch.object(release, 'command', side_effect=['[[]]', json.dumps(drafts), json.dumps([uploaded['assets']])]) as command, patch.object(release.subprocess, 'run') as run:
                     if valid:
                         release.publish(args)
                     else:
@@ -103,8 +107,32 @@ class ReleaseTests(unittest.TestCase):
                     calls = [call.args[0] for call in run.call_args_list]
                     self.assertIn('--draft', calls[0])
                     self.assertEqual(any('edit' in call for call in calls), valid)
+                    self.assertEqual(command.call_args.args[-1], 'repos/coldctl/coldctl/releases/123/assets?per_page=100')
                     if valid:
                         self.assertIn('--draft=false', calls[-1])
+
+    def test_registry_smoke_installs_all_engines_and_stops_on_failure(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                root = work / 'root.json'
+                root.write_text('{}')
+                stem = 'coldctl-1.2.3-x86_64-unknown-linux-gnu'
+                with tarfile.open(work / (stem + '.tar.gz'), 'w:gz') as archive:
+                    entry = tarfile.TarInfo(stem + '/coldctl')
+                    entry.size = 5
+                    archive.addfile(entry, io.BytesIO(b'agent'))
+                effect = [None, None, subprocess.CalledProcessError(1, 'install')] if failure else None
+                with patch.object(release.subprocess, 'run', side_effect=effect) as run:
+                    if failure:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            release.smoke_registry(work, '1.2.3', root, work, work)
+                        self.assertEqual(run.call_count, 3)
+                    else:
+                        release.smoke_registry(work, '1.2.3', root, work, work)
+                        installs = [c.args[0][5] for c in run.call_args_list if 'install' in c.args[0]]
+                        self.assertEqual(installs, ['postgres', 'mysql', 'mongodb'])
+                        self.assertEqual(run.call_args.args[0][-1], 'doctor')
 
 
 if __name__ == '__main__':

@@ -535,7 +535,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "coldctl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-cloud"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "coldctl-core",
  "reqwest 0.12.28",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-connector-mongodb"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "coldctl-connector-protocol",
  "coldctl-connector-runtime",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-connector-mysql"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "coldctl-connector-protocol",
  "coldctl-connector-runtime",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-connector-postgres"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "coldctl-connector-protocol",
  "coldctl-connector-runtime",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-connector-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-connector-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "coldctl-connector-protocol",
  "libc",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "coldctl-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arrow-array",

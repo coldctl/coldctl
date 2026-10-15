@@ -142,7 +142,9 @@ impl Fixture {
         } else {
             "2099-01-01T00:00:00Z"
         };
-        let target=self.sign(&json!({"_type":"targets","spec_version":"1.0.0","version":version,"expires":expires,"targets":targets}));
+        // RepositoryEditor emits an empty delegation block for top-level targets.
+        // Exercise the publisher's representation through every install/refresh test.
+        let target=self.sign(&json!({"_type":"targets","spec_version":"1.0.0","version":version,"expires":expires,"targets":targets,"delegations":{"keys":{},"roles":[]}}));
         let snapshot=self.sign(&json!({"_type":"snapshot","spec_version":"1.0.0","version":version,"expires":expires,"meta":{"targets.json":descriptor(&target,Some(version))}}));
         let timestamp=self.sign(&json!({"_type":"timestamp","spec_version":"1.0.0","version":version,"expires":expires,"meta":{"snapshot.json":descriptor(&snapshot,Some(version))}}));
         for (name, bytes) in [

@@ -276,7 +276,13 @@ async fn refresh_store(store: &Store, bundle: Option<&Path>) -> Result<(Reposito
     };
     let repo=RepositoryLoader::new(&root,metadata,targets).limits(limits).transport(transport).datastore(&datastore).load().await.map_err(|_|fail("TUF verification failed: check signatures, metadata expiry, rollback, root rotation and registry availability"))?;
     // This registry profile uses top-level targets only, preventing delegated trust expansion.
-    if repo.targets().signed.delegations.is_some() {
+    if repo
+        .targets()
+        .signed
+        .delegations
+        .as_ref()
+        .is_some_and(|delegations| !delegations.roles.is_empty())
+    {
         return Err(fail("connector registry delegations are not supported"));
     }
     let bytes = target_bytes(&repo, "catalog.json", MAX_CATALOG).await?;
