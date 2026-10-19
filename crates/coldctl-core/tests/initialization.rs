@@ -160,6 +160,7 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         include_str!("../migrations/0015_azure_sink.sql"),
         include_str!("../migrations/0016_recurring.sql"),
         include_str!("../migrations/0017_monitoring.sql"),
+        include_str!("../migrations/0018_gcs_sink.sql"),
     ];
     for version in 1..=migrations.len() {
         let (_temp, paths) = setup();
@@ -187,6 +188,10 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         }
         if version >= 14 {
             conn.execute("INSERT INTO destinations(id,name,destination_type,path,created_at,config_json) VALUES('s3-preserved','s3-preserved','s3','staging','original',?1)", [r#"{"kind":"s3","bucket":"keep-me","region":"us-east-1","prefix":"archive","endpoint":null,"access_key_env":"KEY","secret_key_env":"SECRET","session_token_env":null,"allow_http":false}"#]).unwrap();
+        }
+        if version >= 16 {
+            conn.execute("INSERT INTO recurring_archives(id,policy_id,policy_name,snapshot_json,options_json,interval_seconds,status,next_due,current_queue,cycles) VALUES('preserved-recurring','migration-policy','migration-policy','{}','{}',60,'active',123,'migration-queue',7)",[]).unwrap();
+            conn.execute("UPDATE archive_queue SET recurring_id='preserved-recurring',cutoff_utc='2025-01-01T00:00:00Z' WHERE id='migration-queue'",[]).unwrap();
         }
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
@@ -234,11 +239,40 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
                 "keep-me"
             );
         }
+        if version >= 16 {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT cycles FROM recurring_archives WHERE id='preserved-recurring'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                7
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT recurring_id FROM archive_queue WHERE id='migration-queue'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "preserved-recurring"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'monitor_%'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            6
+        );
         assert_eq!(
             conn.query_row("SELECT max(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            17
+            18
         );
         assert_eq!(
             conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

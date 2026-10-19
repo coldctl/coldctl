@@ -1,4 +1,5 @@
 pub mod azure;
+pub mod gcs;
 pub mod local;
 mod object;
 pub mod s3;
@@ -54,7 +55,7 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         return Err(Error::DestinationConfiguration(
-            "name must contain 1–64 ASCII letters, digits, hyphens, or underscores",
+            "name must contain 1â€“64 ASCII letters, digits, hyphens, or underscores",
         ));
     }
     Ok(())

@@ -5,12 +5,12 @@ to completion using the existing archive checkpoints. It supports delayed starts
 automatic resume after a worker restart, and bounded retries for transient errors.
 It deletes PostgreSQL, MySQL or MongoDB source records only with explicit `--delete-after-archive`
 authorization; see [verified deletion](DELETION.md). Recurring PostgreSQL, MySQL and MongoDB
-archives to S3 or Azure Blob are available through the explicitly authorized recurring workflow below.
+archives to S3, Azure Blob or Google Cloud Storage are available through the explicitly authorized recurring workflow below.
 Ordinary `enqueue --allow-repeat` still acknowledges possible duplicate exports.
 
 ## Recurring archive and verified deletion
 
-Run `coldctl init` to upgrade to schema 16. Create policies using an S3 or Azure Blob destination,
+Run `coldctl init` to upgrade to schema 18. Create policies using an S3, Azure Blob or GCS destination,
 then explicitly authorize recurring deletion for each policy:
 
 ```powershell

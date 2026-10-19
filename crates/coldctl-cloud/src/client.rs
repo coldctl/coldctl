@@ -262,6 +262,20 @@ mod tests {
             .into(),
         )
         .unwrap();
+        state::destinations::add_remote(
+            &paths,
+            "gcs-remote",
+            &dir.path().join("PRIVATE_GCS_STAGING"),
+            coldctl_core::destination::gcs::GcsConfig {
+                bucket: "private-gcs-bucket".into(),
+                prefix: "PRIVATE_GCS_PREFIX".into(),
+                credentials_env: Some("PRIVATE_GCS_CREDENTIALS".into()),
+                endpoint: None,
+                allow_http: false,
+            }
+            .into(),
+        )
+        .unwrap();
         state::archive::policy_create(
             &paths,
             "policy",
@@ -280,6 +294,10 @@ mod tests {
         .unwrap();
         let report = String::from_utf8(encode(&collect(&paths, "test").unwrap()).unwrap()).unwrap();
         for secret in [
+            "private-gcs-bucket",
+            "PRIVATE_GCS_PREFIX",
+            "PRIVATE_GCS_CREDENTIALS",
+            "PRIVATE_GCS_STAGING",
             "privateazureaccount",
             "private-container",
             "PRIVATE_AZURE_PREFIX",

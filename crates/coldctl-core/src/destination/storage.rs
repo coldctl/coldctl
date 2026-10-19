@@ -9,6 +9,7 @@ use std::path::Path;
 pub enum DestinationConfig {
     S3(S3Config),
     Azure(super::azure::AzureConfig),
+    Gcs(super::gcs::GcsConfig),
 }
 impl From<S3Config> for DestinationConfig {
     fn from(config: S3Config) -> Self {
@@ -20,23 +21,31 @@ impl From<super::azure::AzureConfig> for DestinationConfig {
         Self::Azure(config)
     }
 }
+impl From<super::gcs::GcsConfig> for DestinationConfig {
+    fn from(config: super::gcs::GcsConfig) -> Self {
+        Self::Gcs(config)
+    }
+}
 impl DestinationConfig {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::S3(_) => "s3",
             Self::Azure(_) => "azure",
+            Self::Gcs(_) => "gcs",
         }
     }
     pub(super) fn build(&self) -> Result<Box<dyn object_store::ObjectStore>, Error> {
         match self {
             Self::S3(config) => Ok(Box::new(config.build()?)),
             Self::Azure(config) => Ok(Box::new(config.build()?)),
+            Self::Gcs(config) => Ok(Box::new(config.build(120).map_err(super::object::network)?)),
         }
     }
     pub(super) fn key(&self, key: &str) -> Result<object_store::path::Path, Error> {
         match self {
             Self::S3(config) => config.key(key),
             Self::Azure(config) => config.key(key),
+            Self::Gcs(config) => config.key(key).map_err(super::object::network),
         }
     }
 
@@ -47,12 +56,14 @@ impl DestinationConfig {
                 config.account, config.container, config.prefix
             ),
             Self::S3(config) => format!("s3://{}/{}", config.bucket, config.prefix),
+            Self::Gcs(config) => format!("gs://{}/{}", config.bucket, config.prefix),
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
         match self {
             Self::S3(config) => config.validate(),
             Self::Azure(config) => config.validate(),
+            Self::Gcs(config) => config.validate().map_err(|_| Error::DestinationConfiguration("invalid GCS configuration; check bucket, prefix, credential reference and loopback endpoint")),
         }
     }
 }

@@ -140,7 +140,7 @@ The configured worker sequence is export -> verify -> refresh gateway catalog ->
 full source/archive/gateway comparison -> verified deletion. Ordinary queued jobs with
 `--delete-after-archive` use the same configured gate. This does not grant deletion
 authority to a schedule that lacks the existing explicit confirmations. Recurring
-supports PostgreSQL, MySQL and MongoDB to S3 or Azure, with their documented
+supports PostgreSQL, MySQL and MongoDB to S3, Azure or GCS, with their documented
 stable-source contracts. MySQL and MongoDB require `quiescent-copy`; continuously
 mutating sources do not acquire snapshot consistency from this gate.
 

@@ -772,19 +772,33 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires COLDCTL_TEST_S3_ENDPOINT and fixture AWS credentials; existing coldctl-test bucket"]
     async fn s3_archive_replays_publication_and_reads_restore_batches() {
-        remote_archive_replays(false).await;
+        remote_archive_replays("s3").await;
     }
     #[tokio::test]
     #[ignore = "requires Azurite, COLDCTL_TEST_AZURE_ENDPOINT and fixture AZURE_STORAGE_ACCOUNT_KEY"]
     async fn azure_archive_replays_publication_and_reads_restore_batches() {
-        remote_archive_replays(true).await;
+        remote_archive_replays("azure").await;
     }
-    async fn remote_archive_replays(azure: bool) {
+    #[tokio::test]
+    #[ignore = "requires loopback GCS emulator with coldctl-test bucket"]
+    async fn gcs_archive_replays_publication_and_reads_restore_batches() {
+        remote_archive_replays("gcs").await;
+    }
+    async fn remote_archive_replays(provider: &str) {
         use crate::destination::{DestinationConfig, azure::AzureConfig, s3::S3Config};
         for publication in [0, 1, 2] {
             let (temp, paths, old) = fixture();
             let mut plan = old.plan;
-            plan.destination_config = Some(if azure {
+            plan.destination_config = Some(if provider == "gcs" {
+                crate::destination::gcs::GcsConfig {
+                    bucket: "coldctl-test".into(),
+                    prefix: format!("tests/{}", uuid::Uuid::new_v4()),
+                    credentials_env: None,
+                    endpoint: Some(std::env::var("COLDCTL_TEST_GCS_ENDPOINT").unwrap()),
+                    allow_http: true,
+                }
+                .into()
+            } else if provider == "azure" {
                 DestinationConfig::Azure(AzureConfig {
                     managed_identity: false,
                     managed_identity_client_id: None,

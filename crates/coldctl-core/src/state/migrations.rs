@@ -29,6 +29,26 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] => Ok(15),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] => Ok(16),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] => Ok(17),
+        [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+        ] => Ok(18),
         _ => Err(Error::InvalidState(
             "unsupported migration history; use a compatible Coldctl version".into(),
         )),
@@ -187,6 +207,25 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
             .map_err(sql_error)?;
         conn.execute(
             "INSERT INTO schema_migrations VALUES(17,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 17 {
+        conn.execute_batch(include_str!("../../migrations/0018_gcs_sink.sql"))
+            .map_err(sql_error)?;
+        let invalid = conn
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(sql_error)?
+            .exists([])
+            .map_err(sql_error)?;
+        if invalid {
+            return Err(Error::InvalidState(
+                "GCS migration found invalid foreign keys".into(),
+            ));
+        }
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(18,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

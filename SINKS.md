@@ -1,6 +1,6 @@
 # Customer-owned archive destinations
 
-The agent supports local directories, S3-compatible object storage and Azure Blob Storage. Archive
+The agent supports local directories, S3-compatible object storage, Azure Blob Storage and Google Cloud Storage. Archive
 execution, verification, restore and verified source deletion use the same
 `ArchiveDestination` interface. Provider details are confined to their adapters and the
 destination factory; future sinks implement this contract without changing the
@@ -9,7 +9,7 @@ separately downloadable sink plugin.
 
 ## Configuration
 
-Run `coldctl init` to upgrade existing state to schema 17. Existing local and S3
+Run `coldctl init` to upgrade existing state to schema 18. Existing local and S3
 destinations, policies, jobs and manifests remain usable. Configuration commands
 do not resolve credentials or contact storage.
 
@@ -159,3 +159,65 @@ expiry, multipart uploads and additional sink adapters are separate follow-ups.
 
 Implementation references: [object_store S3 adapter](https://docs.rs/object_store/0.12.5/object_store/aws/index.html)
 and [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
+
+
+## Google Cloud Storage
+
+Run `coldctl init` to upgrade to schema 18 before adding a GCS destination. Existing
+policies, jobs, queues and recurring schedules retain their IDs and configurations.
+The bucket must already exist; coldctl does not create cloud buckets.
+
+```powershell
+# Optional explicit credential file; the variable holds a path, not JSON contents.
+$env:GOOGLE_APPLICATION_CREDENTIALS = 'C:\credentials\coldctl-service-account.json'
+coldctl destination add gcs --name customer-gcs --bucket customer-archive --prefix coldctl
+coldctl destination test customer-gcs
+```
+
+Use `--credentials-env COLDCTL_GCS_CREDENTIALS` to select another variable containing
+an absolute ADC JSON file path. Only its name is stored. Without an explicit variable,
+the adapter checks `GOOGLE_APPLICATION_CREDENTIALS`, the local gcloud ADC file, then
+attached GCP instance credentials. Tokens refresh through the storage SDK. Missing
+explicit credentials fail rather than falling back. Service-account and authorized-user
+ADC files are supported. The pinned SDK does **not** support external-account workload
+identity federation files; these fail explicitly. Credential files cannot override
+storage endpoints or disable authentication. Keep files private to the service account.
+
+Use the normal archive/resume/verify/restore/shadow commands with this destination.
+Recurring PostgreSQL/MySQL/MongoDB archives also accept GCS and retain their existing
+stable-source requirements and verified-deletion gates. Publication is create-only,
+reads are SHA-256 verified, and pending batches use durable local staging. No source
+deletion is implied by configuring a bucket. Cloud sync sends only destination ID,
+name and kind (`gcs`), never the bucket, prefix or credential configuration. The Cloud
+API must be upgraded to accept the new kind before syncing GCS metadata.
+
+Grant the archive writer object create/get permissions and delete permission for its
+unique access-test probe. `roles/storage.objectUser` at bucket scope includes these;
+a narrower custom role is possible. Give the Gateway separate read/list permissions
+(e.g. bucket-scoped `roles/storage.objectViewer`). Retention locks can prevent probe
+cleanup; failed cleanup is reported as a failed access test. Customer KMS permissions,
+retention policies, IAM and real GCP identity still need qualification in your account.
+See [Google authentication](https://cloud.google.com/storage/docs/authentication) and
+[Storage IAM roles](https://cloud.google.com/iam/docs/roles-permissions/storage).
+
+### Local GCS qualification
+
+The pinned XML-compatible emulator fork recommended by the
+[object_store project](https://github.com/apache/arrow-rs-object-store/blob/main/CONTRIBUTING.md)
+exercises protocol behavior; it does not qualify Google IAM, durability or retention guarantees.
+It ignores generation-match create preconditions. Coldctl correctly rejects that
+endpoint in `destination test`. The archive tests use a loopback-only Python proxy
+that models create-only conflicts under a lock; this is a test fixture, not proof
+of GCS concurrency behavior. Real GCP qualification remains required.
+Emulator mode is anonymous and only allows explicit HTTP loopback endpoints. It does
+not resolve Google credentials. Do not use emulator archives to authorize live deletion.
+
+```powershell
+docker compose -f scripts/compose.gcs.yml up -d
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:14443/storage/v1/b -ContentType application/json -Body '{"name":"coldctl-test"}'
+./scripts/test-gcs.ps1
+# In archive-gateway, retrieval uses the emulator directly:
+$env:COLDCTL_TEST_GCS_ENDPOINT = 'http://127.0.0.1:14443'
+# cargo test --locked --lib gcs_gateway_end_to_end -- --ignored
+docker compose -f scripts/compose.gcs.yml down
+```

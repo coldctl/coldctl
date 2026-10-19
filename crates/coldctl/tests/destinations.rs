@@ -13,6 +13,79 @@ fn run(path: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn gcs_cli_configuration_is_offline_and_credentials_remain_references() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    assert!(run(&state, &["init"]).status.success());
+    let added = run(
+        &state,
+        &[
+            "destination",
+            "add",
+            "gcs",
+            "--name",
+            "gcs-test",
+            "--bucket",
+            "customer-archive",
+            "--credentials-env",
+            "COLDCTL_MISSING_GCS_CREDENTIALS",
+            "--output",
+            "json",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(saved["destination_type"], "gcs");
+    assert_eq!(
+        saved["config"]["credentials_env"],
+        "COLDCTL_MISSING_GCS_CREDENTIALS"
+    );
+    assert!(!state.join("staging").exists());
+    let shown = run(
+        &state,
+        &["destination", "show", "gcs-test", "--output", "json"],
+    );
+    assert!(shown.status.success());
+    assert_eq!(
+        saved,
+        serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap()
+    );
+    assert!(
+        !run(&state, &["destination", "test", "gcs-test"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(
+            &state,
+            &[
+                "destination",
+                "add",
+                "gcs",
+                "--name",
+                "unsafe",
+                "--bucket",
+                "customer-archive",
+                "--endpoint",
+                "http://example.com",
+                "--allow-http"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(&state, &["destination", "remove", "gcs-test"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn azure_cli_configuration_and_show_are_offline() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");

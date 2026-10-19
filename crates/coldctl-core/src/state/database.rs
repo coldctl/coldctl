@@ -50,6 +50,9 @@ pub fn initialize(paths: &StatePaths, cli_version: &str) -> Result<InitOutcome, 
     (|| {
         let mut conn = Connection::open(paths.database()).map_err(sql_error)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(sql_error)?;
+        // Table-rebuild migrations preserve references and validate them before
+        // committing. Set this explicitly: bundled SQLite may default to ON.
+        conn.pragma_update(None, "foreign_keys", false).map_err(sql_error)?;
         // Lock before inspecting state. Migrations and identity commit together.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
         migrations::apply(&tx)?;

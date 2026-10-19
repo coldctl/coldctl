@@ -4,6 +4,7 @@ use coldctl_core::paths::StatePaths;
 
 mod add;
 mod azure;
+mod gcs;
 mod list;
 mod remove;
 mod s3;
@@ -43,6 +44,8 @@ pub enum AddCommand {
     S3(Box<s3::Args>),
     /// Configure customer-owned Azure Blob Storage or Azurite.
     Azure(Box<azure::Args>),
+    /// Configure Google Cloud Storage using ADC or an anonymous loopback emulator.
+    Gcs(Box<gcs::Args>),
 }
 
 pub fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
@@ -56,6 +59,9 @@ pub fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Err
         Command::Add {
             destination: AddCommand::Azure(options),
         } => azure::run(*options, paths, args.output),
+        Command::Add {
+            destination: AddCommand::Gcs(options),
+        } => gcs::run(*options, paths, args.output),
         Command::List => list::run(paths, args.output),
         Command::Show { name } => show::run(paths, &name, args.output),
         Command::Test { name } => test::run(paths, &name, args.output),

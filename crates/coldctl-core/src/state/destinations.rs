@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 fn open(paths: &StatePaths, writable: bool) -> Result<Connection, Error> {
     let conn = open_initialized(paths, writable)?;
-    if migrations::version(&conn).map_err(|e| at_path(e, paths))? < 15 {
+    if migrations::version(&conn).map_err(|e| at_path(e, paths))? < 18 {
         return Err(Error::InvalidState(
             "destination schema needs an upgrade; run `coldctl init`".into(),
         ));

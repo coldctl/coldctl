@@ -91,10 +91,10 @@ pub fn create(
     let s = super::sources::show(paths, &p.source)?;
     let d = super::destinations::show(paths, &p.destination)?;
     if !matches!(s.source_type.as_str(), "postgres" | "mysql" | "mongodb")
-        || !matches!(d.destination_type.as_str(), "s3" | "azure")
+        || !matches!(d.destination_type.as_str(), "s3" | "azure" | "gcs")
     {
         return Err(Error::Archive(
-            "recurring supports PostgreSQL, MySQL or MongoDB to S3 or Azure Blob",
+            "recurring supports PostgreSQL, MySQL or MongoDB to S3, Azure Blob or Google Cloud Storage",
         ));
     }
     if matches!(s.source_type.as_str(), "mysql" | "mongodb")
@@ -335,6 +335,13 @@ mod tests {
         azure: bool,
         mysql: bool,
     ) -> (tempfile::TempDir, StatePaths, scheduler::Options) {
+        fixture_sink(azure, mysql, false)
+    }
+    fn fixture_sink(
+        azure: bool,
+        mysql: bool,
+        gcs: bool,
+    ) -> (tempfile::TempDir, StatePaths, scheduler::Options) {
         let temp = tempfile::tempdir().unwrap();
         let paths = StatePaths::resolve(Some(temp.path())).unwrap();
         state::initialize(&paths, "test").unwrap();
@@ -348,7 +355,22 @@ mod tests {
             },
         )
         .unwrap();
-        if azure {
+        if gcs {
+            state::destinations::add_remote(
+                &paths,
+                "s3",
+                &temp.path().join("staging"),
+                crate::destination::gcs::GcsConfig {
+                    bucket: "test-archives".into(),
+                    prefix: "test".into(),
+                    credentials_env: Some("UNUSED_GCS_CREDENTIALS".into()),
+                    endpoint: None,
+                    allow_http: false,
+                }
+                .into(),
+            )
+            .unwrap();
+        } else if azure {
             state::destinations::add_remote(
                 &paths,
                 "s3",
@@ -452,8 +474,8 @@ mod tests {
     }
     #[test]
     fn mysql_recurring_requires_quiescence_and_retains_cutoff_and_deletion_gate() {
-        for azure in [false, true] {
-            let (_temp, paths, mut options) = fixture_engine(azure, true);
+        for (azure, gcs) in [(false, false), (true, false), (false, true)] {
+            let (_temp, paths, mut options) = fixture_sink(azure, true, gcs);
             assert!(create(&paths, "orders", 60, options.clone()).is_err());
             options.source_stability = SourceStability::QuiescentCopy;
             let schedule = create(&paths, "orders", 60, options).unwrap();

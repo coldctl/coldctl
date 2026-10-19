@@ -5,7 +5,7 @@ and retrieve historical data while keeping storage and execution on your infrast
 
 ColdCTL is designed to support multiple database engines and storage destinations.
 The current agent supports optional **PostgreSQL, MySQL and MongoDB connectors**
-and local, customer-owned S3-compatible, or Azure Blob archive storage. See [cloud storage authentication](CLOUD_AUTH.md) for AWS roles, Azure managed identity, and a remote trial checklist.
+and local, customer-owned S3-compatible, Azure Blob or Google Cloud Storage archives. See [destination setup](SINKS.md) for GCS credentials and qualification limits. See [cloud storage authentication](CLOUD_AUTH.md) for AWS roles, Azure managed identity, and a remote trial checklist.
 
 ## Current capabilities
 
