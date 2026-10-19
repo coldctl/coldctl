@@ -297,6 +297,234 @@ fn run_options(max: Option<u64>) -> executor::RunOptions {
         progress: None,
     }
 }
+
+#[tokio::test]
+#[ignore = "requires disposable MySQL 8.4 with PROCESS and performance_schema access"]
+async fn mysql_deletion_allows_unrelated_writes_and_guards_schema() {
+    use coldctl_core::source::connector::DeleteSpec;
+    let config = SourceConnection::from_mysql_url_env("COLDCTL_TEST_MYSQL_URL".into())
+        .unwrap()
+        .with_ca_env(Some("COLDCTL_TEST_MYSQL_CA".into()))
+        .unwrap();
+    let resolved = config.resolve().unwrap();
+    let mut admin = mysql::connect(&resolved, false).await.unwrap();
+    let mut blocker = mysql::connect(&resolved, false).await.unwrap();
+    let mut writer = mysql::connect(&resolved, false).await.unwrap();
+    writer
+        .query_drop("SET SESSION lock_wait_timeout=1")
+        .await
+        .unwrap();
+    writer
+        .query_drop("SET SESSION innodb_lock_wait_timeout=1")
+        .await
+        .unwrap();
+    let name = format!(
+        "locking_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let target = mysql::table(&resolved.database, &name);
+    let child = mysql::table(&resolved.database, &format!("child_{name}"));
+    admin.query_drop(format!("CREATE TABLE {target}(id BIGINT PRIMARY KEY,created_at DATETIME(6),note TEXT) ENGINE=InnoDB")).await.unwrap();
+    admin.query_drop(format!("INSERT INTO {target} VALUES(1,'2020-01-01','original'),(2,'2020-01-01','original'),(9999,UTC_TIMESTAMP(),'recent')")).await.unwrap();
+    admin
+        .query_drop(format!(
+            "CREATE TABLE {child}(id BIGINT PRIMARY KEY) ENGINE=InnoDB"
+        ))
+        .await
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
+    state::initialize(&paths, "test").unwrap();
+    sources::add(&paths, "source", config).unwrap();
+    destinations::add_local(&paths, "disk", &temp.path().join("archives")).unwrap();
+    store::policy_create(
+        &paths,
+        "events",
+        "source",
+        "disk",
+        PolicyConfig {
+            schema: resolved.database.clone(),
+            table: name.clone(),
+            time_column: "created_at".into(),
+            older_than_days: 365,
+            batch_size: 20,
+            equals_column: None,
+            equals_value: None,
+        },
+    )
+    .unwrap();
+    let job = executor::run(&paths, "events", run_options(None))
+        .await
+        .unwrap();
+    let identity: String = admin
+        .query_first("SELECT @@server_uuid")
+        .await
+        .unwrap()
+        .unwrap();
+    let native: Vec<Row> = admin
+        .query(format!("SELECT * FROM {target} WHERE id<3 ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = native
+        .into_iter()
+        .map(|r| mysql::encode(r, &job.plan.columns).unwrap())
+        .collect::<Vec<_>>();
+    let ddls = [
+        format!("ALTER TABLE {target} ADD COLUMN unexpected INT"),
+        format!(
+            "CREATE TRIGGER {} BEFORE DELETE ON {target} FOR EACH ROW SET @coldctl_trigger=1",
+            mysql::table(&resolved.database, &format!("tr_{name}"))
+        ),
+        format!(
+            "ALTER TABLE {child} ADD FOREIGN KEY(id) REFERENCES {target}(id) ON DELETE CASCADE"
+        ),
+    ];
+    for (phase, ddl) in ddls.iter().map(Some).chain([None, None]).enumerate() {
+        blocker.query_drop("START TRANSACTION").await.unwrap();
+        blocker
+            .query_drop(format!("UPDATE {target} SET note='changed' WHERE id=2"))
+            .await
+            .unwrap();
+        let mut deletion = crate::mysql_delete::DeleteSession::open(
+            resolved.clone(),
+            DeleteSpec {
+                plan: job.plan.clone(),
+                source_identity: identity.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let batch = rows.clone();
+        let task = tokio::spawn(async move { deletion.batch(&batch).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: u64 = admin.exec_first("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON w.REQUESTING_ENGINE_LOCK_ID=l.ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME=?",(&resolved.database,&name)).await.unwrap().unwrap();
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                !task.is_finished() && std::time::Instant::now() < deadline,
+                "deletion did not reach row lock wait"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let started = std::time::Instant::now();
+        writer
+            .query_drop(format!(
+                "UPDATE {target} SET note='writer succeeded' WHERE id=9999"
+            ))
+            .await
+            .unwrap();
+        writer
+            .query_drop(format!(
+                "INSERT INTO {target} VALUES(8888,UTC_TIMESTAMP(),'temporary')"
+            ))
+            .await
+            .unwrap();
+        writer
+            .query_drop(format!("DELETE FROM {target} WHERE id=8888"))
+            .await
+            .unwrap();
+        eprintln!(
+            "phase {phase}: unrelated writes completed in {:?}",
+            started.elapsed()
+        );
+        if let Some(ddl) = ddl {
+            let error = writer.query_drop(ddl).await.unwrap_err();
+            assert!(
+                matches!(error,mysql_async::Error::Server(ref e) if e.code==1205),
+                "{error}"
+            );
+            blocker.query_drop("COMMIT").await.unwrap();
+            let error = task.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("row differs"), "{error}");
+        } else if phase == 3 {
+            let error = task.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("timeout"), "{error}");
+            blocker.query_drop("ROLLBACK").await.unwrap();
+        } else {
+            blocker.query_drop("ROLLBACK").await.unwrap();
+            let result = task.await.unwrap().unwrap();
+            assert_eq!(result.deleted, 2);
+            assert_eq!(result.absent, 0);
+        }
+        let count: u64 = admin
+            .query_first(format!("SELECT COUNT(*) FROM {target}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, if phase == 4 { 1 } else { 3 });
+        if phase < 4 {
+            admin
+                .query_drop(format!("UPDATE {target} SET note='original' WHERE id=2"))
+                .await
+                .unwrap();
+        }
+    }
+    let spec = DeleteSpec {
+        plan: job.plan.clone(),
+        source_identity: identity,
+    };
+    let mut replay = crate::mysql_delete::DeleteSession::open(resolved.clone(), spec.clone())
+        .await
+        .unwrap();
+    let result = replay.batch(&rows).await.unwrap();
+    assert_eq!(result.deleted, 0);
+    assert_eq!(result.absent, 2);
+    drop(replay);
+    let trigger = mysql::table(&resolved.database, &format!("tr_{name}"));
+    admin
+        .query_drop(format!(
+            "CREATE TRIGGER {trigger} BEFORE DELETE ON {target} FOR EACH ROW SET @coldctl_trigger=1"
+        ))
+        .await
+        .unwrap();
+    let mut denied = crate::mysql_delete::DeleteSession::open(resolved.clone(), spec.clone())
+        .await
+        .unwrap();
+    assert!(
+        denied
+            .batch(&rows)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("triggers or incoming")
+    );
+    drop(denied);
+    admin
+        .query_drop(format!("DROP TRIGGER {trigger}"))
+        .await
+        .unwrap();
+    admin
+        .query_drop(format!(
+            "ALTER TABLE {child} ADD FOREIGN KEY(id) REFERENCES {target}(id) ON DELETE CASCADE"
+        ))
+        .await
+        .unwrap();
+    let mut denied = crate::mysql_delete::DeleteSession::open(resolved, spec)
+        .await
+        .unwrap();
+    assert!(
+        denied
+            .batch(&rows)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("triggers or incoming")
+    );
+    drop(denied);
+    admin
+        .query_drop(format!("DROP TABLE {child}"))
+        .await
+        .unwrap();
+    admin
+        .query_drop(format!("DROP TABLE {target}"))
+        .await
+        .unwrap();
+}
 fn restore(target: &str) -> postgres_restore::Options {
     postgres_restore::Options {
         target: "target".into(),
@@ -711,24 +939,33 @@ async fn mysql_rejects_unqualified_schema_and_oversized_values() {
             .await
             .unwrap();
     }
-    admin
+    let myisam = admin
         .query_drop(format!(
             "CREATE TABLE {qualified}(id BIGINT PRIMARY KEY,created_at DATE) ENGINE=MyISAM"
         ))
-        .await
-        .unwrap();
-    let mut scan = mysql_archive::MysqlArchive::connect(resolved.clone())
-        .await
-        .unwrap();
-    assert!(
-        scan.plan(policy(&name), std::path::PathBuf::from("unused"))
-            .await
-            .is_err()
-    );
-    admin
-        .query_drop(format!("DROP TABLE {qualified}"))
-        .await
-        .unwrap();
+        .await;
+    match myisam {
+        Ok(()) => {
+            let mut scan = mysql_archive::MysqlArchive::connect(resolved.clone())
+                .await
+                .unwrap();
+            assert!(
+                scan.plan(policy(&name), std::path::PathBuf::from("unused"))
+                    .await
+                    .is_err()
+            );
+            admin
+                .query_drop(format!("DROP TABLE {qualified}"))
+                .await
+                .unwrap();
+        }
+        Err(mysql_async::Error::Server(error)) if error.code == 3161 => {
+            eprintln!(
+                "MyISAM connector rejection subcase skipped: server disables that engine (3161)"
+            );
+        }
+        Err(error) => panic!("cannot create MyISAM fixture: {error}"),
+    }
     admin.query_drop(format!("CREATE TABLE {qualified}(id BIGINT PRIMARY KEY,created_at DATE,payload LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin) ENGINE=InnoDB")).await.unwrap();
     admin.query_drop(format!("INSERT INTO {qualified} VALUES(-9223372036854775808,'2020-01-01','low'),(9223372036854775807,'2020-01-01','high')")).await.unwrap();
     let mut scan = mysql_archive::MysqlArchive::connect(resolved.clone())

@@ -347,6 +347,7 @@ mod tests {
             gateway_mismatches: 0,
             gateway_checked: true,
             gateway_lookups: 3,
+            gateway_requests: 1,
             manifest_sha256: Some("manifest".into()),
             failure: None,
             automatic_binding: None,

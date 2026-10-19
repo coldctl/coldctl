@@ -24,6 +24,10 @@ pub enum Error {
     Timeout,
     OutcomeUnknown,
     Configuration,
+    Tls,
+    InvalidCa,
+    UnsupportedFilter,
+    Connection,
     Authentication,
     Permission,
     Schema,
@@ -40,6 +44,10 @@ impl std::fmt::Display for Error {
             Self::Timeout=>"connector operation timed out; session closed",
             Self::OutcomeUnknown=>"connector write outcome unknown; reconcile the target journal before retrying",
             Self::Configuration=>"connector rejected configuration or operation; check source and target configuration",
+            Self::Tls=>"TLS handshake or certificate validation failed; check the server hostname and trusted CA, or configure --tls-ca-env with the provider CA PEM",
+            Self::InvalidCa=>"invalid TLS CA bundle; --tls-ca-env must reference PEM certificate contents, not a file path; TLS must be enabled",
+            Self::UnsupportedFilter=>"PostgreSQL --equals-column must name a text/varchar/char column; numeric equality filters are not supported",
+            Self::Connection=>"database connection failed; check host, port, DNS, firewall and server availability",
             Self::Authentication=>"connector authentication rejected; check credential reference",
             Self::Permission=>"connector permission denied; check database privileges",
             Self::Schema=>"connector identity or schema changed; refusing operation",
@@ -152,7 +160,9 @@ impl Client {
                     return Err(Error::Protocol);
                 }
             };
-        if negotiate(&hello, &features, &features).is_err()
+        let mut host_features = features.clone();
+        host_features.insert("safe-diagnostics-v1".into());
+        if negotiate(&hello, &host_features, &features).is_err()
             || hello.connector.id != expected_id
             || hello.connector.sha256 != hash
             || digest(&path)? != hash

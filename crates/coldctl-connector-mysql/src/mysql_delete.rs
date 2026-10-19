@@ -1,4 +1,4 @@
-//! One explicitly locked InnoDB transaction per verified archive batch.
+//! Bounded, row-locked InnoDB transactions with metadata protection.
 use crate::{
     mysql::{self, bad, err, q, table},
     mysql_archive::{MysqlArchive, key_parameter, key_type},
@@ -20,15 +20,37 @@ pub struct DeleteSession {
 
 // Information_schema.triggers silently omits triggers without TRIGGER privilege.
 // Require a direct grant at a recognized exact scope rather than trusting an
-// empty metadata result. Role-only grants and partial revokes fail closed.
+// empty metadata result. Accept unrelated database revokes, never target revokes.
 fn can_inspect_triggers(grants: &[String], database: &str, name: &str) -> bool {
-    if grants.iter().any(|s| s.starts_with("REVOKE ")) {
-        return false;
+    for grant in grants.iter().filter(|s| s.starts_with("REVOKE ")) {
+        let Some((_, scope)) = grant.split_once(" ON ") else {
+            return false;
+        };
+        let Some((scope, _)) = scope.split_once(" FROM ") else {
+            return false;
+        };
+        // SHOW GRANTS uses backticks or ANSI double quotes. Only accept a
+        // simple, exact database scope; ambiguous wildcard syntax fails closed.
+        let Some(db) = scope.strip_suffix(".*") else {
+            return false;
+        };
+        let db = db
+            .strip_prefix('`')
+            .and_then(|s| s.strip_suffix('`'))
+            .or_else(|| db.strip_prefix('"').and_then(|s| s.strip_suffix('"')));
+        let Some(db) = db else {
+            return false;
+        };
+        if mysql::name(db).is_err() || db.eq_ignore_ascii_case(database) {
+            return false;
+        }
     }
     let scopes = [
         "*.*".to_owned(),
         format!("{}.*", q(database)),
         table(database, name),
+        format!("\"{database}\".*"),
+        format!("\"{database}\".\"{name}\""),
     ];
     grants.iter().any(|grant| {
         let Some(body) = grant.strip_prefix("GRANT ") else {
@@ -60,12 +82,8 @@ impl DeleteSession {
         Ok(Self { archive, spec })
     }
     pub async fn abort(&mut self) {
-        // UNLOCK TABLES can commit: always ROLLBACK first, and never unlock if
-        // rollback itself fails. Process exit then closes the connection.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            if self.archive.conn.query_drop("ROLLBACK").await.is_ok() {
-                let _ = self.archive.conn.query_drop("UNLOCK TABLES").await;
-            }
+            let _ = self.archive.conn.query_drop("ROLLBACK").await;
         })
         .await;
     }
@@ -115,13 +133,22 @@ impl DeleteSession {
         let target = table(database, name);
         self.archive
             .conn
-            .query_drop("SET autocommit=0")
+            .query_drop("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             .await
             .map_err(err)?;
-        // START TRANSACTION after LOCK TABLES would release the explicit locks.
         self.archive
             .conn
-            .query_drop(format!("LOCK TABLES {target} WRITE"))
+            .query_drop("START TRANSACTION")
+            .await
+            .map_err(err)?;
+        // Open the table with a write-compatible metadata lock before inspecting
+        // schema/triggers/FKs. Held through commit; unrelated DML remains allowed.
+        self.archive
+            .conn
+            .query_drop(format!(
+                "SELECT {} FROM {target} WHERE 0 FOR UPDATE",
+                q(&plan.primary_key)
+            ))
             .await
             .map_err(err)?;
         self.archive.validate_resume(plan).await?;
@@ -160,63 +187,82 @@ impl DeleteSession {
             .map(|c| format!("COALESCE(OCTET_LENGTH({}),0)", q(&c.name)))
             .collect::<Vec<_>>()
             .join("+");
-        let size_sql = format!(
-            "SELECT {sizes} FROM {target} WHERE {}=?",
-            q(&plan.primary_key)
+        let placeholders = vec!["?"; parameters.len()].join(",");
+        let predicate = format!("{} IN ({placeholders})", q(&plan.primary_key));
+        // Lock the bounded key set before fetching potentially large values.
+        // READ COMMITTED avoids retaining gaps for missing keys. Only the keys
+        // actually read below are deleted, so a later insert cannot be swept up.
+        let found_sizes: Vec<(mysql_async::Value, u64)> = self.archive.conn.exec(
+            format!("SELECT {}, {sizes} FROM {target} FORCE INDEX (PRIMARY) WHERE {predicate} ORDER BY {} FOR UPDATE", q(&plan.primary_key), q(&plan.primary_key)),
+            mysql_async::Params::Positional(parameters.clone())).await.map_err(err)?;
+        if found_sizes.iter().any(|(_, size)| *size > 30000) {
+            return Err(Error::Archive(
+                "MySQL source row changed or exceeds archive byte limit",
+            ));
+        }
+        let parameters: Vec<_> = found_sizes.into_iter().map(|(key, _)| key).collect();
+        let predicate = format!(
+            "{} IN ({})",
+            q(&plan.primary_key),
+            vec!["?"; parameters.len()].join(",")
         );
         let select_sql = format!(
-            "SELECT {columns} FROM {target} WHERE {}=?",
+            "SELECT {columns} FROM {target} FORCE INDEX (PRIMARY) WHERE {predicate} ORDER BY {} FOR UPDATE",
             q(&plan.primary_key)
         );
-        let delete_sql = format!("DELETE FROM {target} WHERE {}=?", q(&plan.primary_key));
-        let mut result = DeleteBatchResult {
-            deleted: 0,
-            absent: 0,
-        };
-        for (expected, key) in rows.iter().zip(parameters) {
-            let size: Option<u64> = self
-                .archive
+        let actual_rows: Vec<Row> = if parameters.is_empty() {
+            Vec::new()
+        } else {
+            self.archive
                 .conn
-                .exec_first(&size_sql, (&key,))
-                .await
-                .map_err(err)?;
-            let Some(size) = size else {
-                result.absent += 1;
-                continue;
-            };
-            if size > 30000 {
-                return Err(Error::Archive(
-                    "MySQL source row changed or exceeds archive byte limit",
-                ));
-            }
-            let actual: Row = self
-                .archive
-                .conn
-                .exec_first(&select_sql, (&key,))
+                .exec(select_sql, mysql_async::Params::Positional(parameters))
                 .await
                 .map_err(err)?
-                .ok_or_else(bad)?;
-            if mysql::encode(actual, &plan.columns)? != *expected {
+        };
+        let expected = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    mysql_types::cursor(kind, row[key_index].as_deref().ok_or_else(bad)?)?,
+                    row,
+                ))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, Error>>()?;
+        let mut present = Vec::new();
+        for actual in actual_rows {
+            let actual = mysql::encode(actual, &plan.columns)?;
+            let key = mysql_types::cursor(kind, actual[key_index].as_deref().ok_or_else(bad)?)?;
+            if expected.get(&key).copied() != Some(&actual) {
                 return Err(Error::Archive(
                     "MySQL source row differs from archive; deletion batch rolled back",
                 ));
             }
+            present.push(key_parameter(kind, key)?);
+        }
+        let mut result = DeleteBatchResult {
+            deleted: 0,
+            absent: (rows.len() - present.len()) as u64,
+        };
+        if !present.is_empty() {
+            let count = present.len() as u64;
+            let placeholders = vec!["?"; present.len()].join(",");
             self.archive
                 .conn
-                .exec_drop(&delete_sql, (&key,))
+                .exec_drop(
+                    format!(
+                        "DELETE FROM {target} WHERE {} IN ({placeholders})",
+                        q(&plan.primary_key)
+                    ),
+                    mysql_async::Params::Positional(present),
+                )
                 .await
                 .map_err(err)?;
-            if self.archive.conn.affected_rows() != 1 {
+            if self.archive.conn.affected_rows() != count {
                 return Err(bad());
             }
-            result.deleted += 1;
+            result.deleted = count;
         }
         self.archive.conn.query_drop("COMMIT").await.map_err(err)?;
-        self.archive
-            .conn
-            .query_drop("UNLOCK TABLES")
-            .await
-            .map_err(err)?;
         Ok(result)
     }
 }
@@ -250,5 +296,36 @@ mod tests {
             "db",
             "events"
         ));
+        for quote in ['`', '"'] {
+            let grant = "GRANT SELECT, DELETE, TRIGGER ON *.* TO 'u'@'%'".to_owned();
+            assert!(can_inspect_triggers(
+                &[
+                    grant.clone(),
+                    format!("REVOKE TRIGGER ON {quote}mysql{quote}.* FROM 'u'@'%'")
+                ],
+                "db",
+                "events"
+            ));
+            assert!(!can_inspect_triggers(
+                &[
+                    grant.clone(),
+                    format!("REVOKE TRIGGER ON {quote}db{quote}.* FROM 'u'@'%'")
+                ],
+                "db",
+                "events"
+            ));
+            assert!(!can_inspect_triggers(
+                &[grant.clone(), "REVOKE TRIGGER ON *.* FROM 'u'@'%'".into()],
+                "db",
+                "events"
+            ));
+            assert!(can_inspect_triggers(
+                &[format!(
+                    "GRANT TRIGGER ON {quote}db{quote}.{quote}events{quote} TO 'u'@'%'"
+                )],
+                "db",
+                "events"
+            ));
+        }
     }
 }

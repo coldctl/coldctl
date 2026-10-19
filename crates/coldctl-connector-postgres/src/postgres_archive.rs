@@ -111,8 +111,8 @@ pub(crate) async fn inspect(
         if !columns.iter().any(|c| {
             c.name == *filter && matches!(c.postgres_type.as_str(), "text" | "varchar" | "bpchar")
         }) {
-            return Err(Error::Archive(
-                "equals-column must be a text/varchar/char column",
+            return Err(Error::Connector(
+                coldctl_connector_runtime::Error::UnsupportedFilter,
             ));
         }
     }

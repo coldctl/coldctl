@@ -28,6 +28,12 @@ pub enum Command {
         #[arg(long)]
         /// Stop after this many batches; a partial report cannot pass.
         max_batches: Option<u64>,
+        /// Keys per Gateway request (1-100); defaults to 64.
+        #[arg(long)]
+        gateway_batch_size: Option<usize>,
+        /// Stop after this duration; partial coverage cannot pass. Blocking storage I/O may finish first.
+        #[arg(long)]
+        max_duration_seconds: Option<u64>,
         #[arg(long, requires_all=["dataset_id","token_env"])]
         /// Gateway HTTPS origin (HTTP is allowed only on loopback).
         gateway_url: Option<String>,
@@ -125,6 +131,8 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
             id,
             confirm_original_source,
             max_batches,
+            gateway_batch_size,
+            max_duration_seconds,
             gateway_url,
             dataset_id,
             token_env,
@@ -136,6 +144,8 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
                 coldctl_core::archive::shadow::Options {
                     confirm_original_source,
                     max_batches,
+                    gateway_batch_size,
+                    max_duration_seconds,
                     gateway_url,
                     dataset_id,
                     token_env,

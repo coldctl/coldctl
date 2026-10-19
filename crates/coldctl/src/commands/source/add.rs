@@ -8,7 +8,7 @@ pub struct Args {
     /// Unique local source name (ASCII letters, digits, hyphens, underscores).
     #[arg(long)]
     name: String,
-    /// Environment variable containing a PEM CA bundle for MySQL/MongoDB certificate validation.
+    /// Environment variable containing a PEM CA bundle for PostgreSQL/MySQL/MongoDB certificate validation.
     #[arg(long)]
     tls_ca_env: Option<String>,
     /// Password-free postgres://, mysql:// or mongodb:// URL; supports sslmode=require|disable.

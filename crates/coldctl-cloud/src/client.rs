@@ -222,6 +222,7 @@ mod tests {
             "db",
             coldctl_core::source::SourceConnection::UrlEnv {
                 variable: "SECRET_URL_ENV".into(),
+                ca_env: Some("PRIVATE_CA_ENV".into()),
             },
         )
         .unwrap();
@@ -286,6 +287,7 @@ mod tests {
             "PRIVATE_AZURE_KEY_ENV",
             "PRIVATE_AZURE_STAGING",
             "SECRET_URL_ENV",
+            "PRIVATE_CA_ENV",
             "private-bucket",
             "PRIVATE_STAGING",
             "PRIVATE_PREFIX",

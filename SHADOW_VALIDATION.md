@@ -18,7 +18,11 @@ requests; use a trusted customer-operated endpoint and a least-privilege tenant 
 Omit all three gateway flags for source-versus-archive comparison only. Such a pass
 does not qualify gateway retrieval. `--max-batches N` bounds a trial; an unfinished
 comparison returns nonzero and status incomplete. Full archive integrity verification
-still runs before the bounded source/gateway comparison. Ctrl+C also stops at a safe boundary.
+still runs before the bounded source/gateway comparison. Use
+`--max-duration-seconds 300` for a five-minute cooperative budget, including
+verification. The synchronous full integrity-verification pass may finish before
+cancellation is observed; this is not a hard wall-clock deadline.
+Expiration produces an incomplete report, never a pass. Ctrl+C also stops at a safe boundary.
 Runs do not delete, restore or change source records. Explicit deletion remains separate.
 
 ## Comparison contract
@@ -26,11 +30,14 @@ Runs do not delete, restore or change source records. Explicit deletion remains 
 The job must be a completed original archive with its original source identity and
 pinned connector, stable-source contract and no deletion history. The process holds
 job/policy locks, verifies archive integrity, re-reads the saved key range, and compares
-every supported column. It then performs one equality lookup per archived primary key
-through the actual gateway search API. Missing/duplicate results, truncation or value
+every supported column. It then checks primary keys in batches through the actual
+gateway search API using typed `IN` filters (64 keys by default; override with
+`--gateway-batch-size 1..100`). Wide rows automatically reduce the batch size to
+leave room beneath the response-size cap. Results are matched by key, independent of order.
+Missing/duplicate/extra results, truncation or value
 differences are failures. A dataset containing duplicate archive generations may fail.
 
-This initial workflow validates **ID equality lookups**, not arbitrary application
+This workflow validates **batched ID membership retrieval**, not arbitrary application
 queries, joins, aggregations, collation or hot/cold routing. PostgreSQL native text
 representations, MySQL text and raw BSON hex are compared exactly; floats are compared
 in their declared precision. Non-finite floats fail rather than silently normalizing.
@@ -42,14 +49,31 @@ live application requests.
 
 Gateway responses are capped at 1 MiB and each request has a 30-second timeout. Source
 queries use the job timeouts. Production protection applies to source reads and gateway
-requests. Large runs make one gateway request per row; start with bounded trials and
+requests. Requests remain sequential and bounded to avoid flooding the Gateway;
+batching amortizes network and query overhead across keys. Reduce batch size for
+wide rows or a Gateway configured with a small result limit. Start with bounded trials and
 measure source, gateway and object-store impact. A rerun starts from the beginning;
 partial reports are evidence, not resumable certification.
 
 ## Durable evidence
 
+### MySQL Azure trial (2026-10-17)
+
+A separate Aiven MySQL 8.4 fixture passed source/archive and full Gateway shadow
+comparison for 40 retained archived rows, with zero mismatches and two batched
+Gateway requests. Exact text keys, decimals, NULL and binary hex survived lookup,
+record detail and JSONL export. A controlled source change produced a mismatch;
+restoring it produced a full pass and the original source fingerprint. This was
+manual validation on a small fixture, without automatic scheduler shadow gating.
+The reusable parent-workspace command is `./demo/mysql-trial/test.ps1 -GatewayShadow`.
+
+### Report storage
+
 Reports in shadow.sqlite include job/run IDs, manifest checksum, timestamps, batches,
-rows, gateway lookup count, source-mismatch batch count and gateway-mismatch row count.
+rows, gateway lookup count (keys checked), gateway HTTP request count,
+source-mismatch batch count and gateway-mismatch row count. Gateway counters are
+saved after every successful request; completed source-batch counters advance only
+after all its Gateway checks finish. Old reports default their request count to zero.
 No row values, raw errors, gateway tokens or key identifiers are persisted. Reports are
 running, incomplete, mismatch, error or passed. A process crash leaves running without
 a finish timestamp; it must never be treated as a pass. The CLI lists the latest 100
@@ -116,8 +140,9 @@ The configured worker sequence is export -> verify -> refresh gateway catalog ->
 full source/archive/gateway comparison -> verified deletion. Ordinary queued jobs with
 `--delete-after-archive` use the same configured gate. This does not grant deletion
 authority to a schedule that lacks the existing explicit confirmations. Recurring
-source/sink support is unchanged: PostgreSQL or MongoDB to S3, with their documented
-stable-source contracts. Continuously mutating MongoDB collections are not qualified.
+supports PostgreSQL, MySQL and MongoDB to S3 or Azure, with their documented
+stable-source contracts. MySQL and MongoDB require `quiescent-copy`; continuously
+mutating sources do not acquire snapshot consistency from this gate.
 
 Before initial deletion, the latest automatic report must be complete, recent, and
 bound to the job, manifest and exact gateway configuration. Manual source-only or
@@ -145,4 +170,4 @@ An in-flight operation can finish, and a delete batch already in progress can co
 Shadow validation currently runs a full job per attempt, outside the export time-slice
 budget, with bounded individual requests (refresh 120 seconds; lookups 30 seconds).
 Choose a validation age large enough for the full run; long comparisons can delay other
-queued jobs. It makes one lookup per record, so qualify throughput before the pilot.
+queued jobs. It checks every key in bounded batches; qualify throughput before the pilot.

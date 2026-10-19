@@ -105,7 +105,8 @@ fn parsing_handles_escaped_fields_ipv6_and_tls_defaults() {
             database: "sales db".into(),
             user: "archive@user".into(),
             tls: TlsMode::Require,
-            password_env: None
+            password_env: None,
+            ca_env: None
         }
     );
 }
@@ -387,4 +388,59 @@ fn mysql_migration_preserves_existing_source_policy_and_foreign_keys() {
             .is_none()
     );
     assert!(sources::remove(&paths, "old").is_err());
+}
+
+#[test]
+fn postgres_ca_references_are_optional_backward_compatible_and_persisted() {
+    for old in [
+        r#"{"kind":"postgres","host":"localhost","port":5432,"database":"db","user":"reader","tls":"require","password_env":null}"#,
+        r#"{"kind":"url_env","variable":"POSTGRES_TEST_URL"}"#,
+    ] {
+        let parsed: SourceConnection = serde_json::from_str(old).unwrap();
+        assert!(!serde_json::to_string(&parsed).unwrap().contains("ca_env"));
+        let configured = parsed.with_ca_env(Some("POSTGRES_TEST_CA".into())).unwrap();
+        let (_temp, paths) = setup();
+        sources::add(&paths, "with_ca", configured.clone()).unwrap();
+        assert_eq!(
+            sources::show(&paths, "with_ca").unwrap().connection,
+            configured
+        );
+        let json = serde_json::to_string(&configured).unwrap();
+        assert!(json.contains("POSTGRES_TEST_CA"));
+        assert!(!json.contains("BEGIN CERTIFICATE"));
+        assert!(
+            configured
+                .with_ca_env(Some("not-a-variable".into()))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn postgres_ca_requires_tls_and_reports_missing_ca_without_disclosing_values() {
+    let disabled =
+        SourceConnection::from_url("postgres://reader@localhost/db?sslmode=disable", None)
+            .unwrap()
+            .with_ca_env(Some("COLDCTL_ABSENT_CA_768324".into()))
+            .unwrap();
+    assert!(
+        disabled
+            .resolve()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("custom CA requires TLS")
+    );
+    let missing = SourceConnection::from_url("postgres://reader@localhost/db", None)
+        .unwrap()
+        .with_ca_env(Some("COLDCTL_ABSENT_CA_768324".into()))
+        .unwrap();
+    assert!(
+        missing
+            .resolve()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("TLS CA environment variable is missing")
+    );
 }

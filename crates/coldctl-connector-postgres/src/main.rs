@@ -19,6 +19,9 @@ fn value<T: Serialize>(value: T) -> Result<serde_json::Value, Error> {
     serde_json::to_value(value).map_err(|_| Error::Archive("connector serialization failed"))
 }
 fn classify(error: &Error) -> runtime::Error {
+    if let Error::Connector(error) = error {
+        return *error;
+    }
     if let Error::Archive(message) = error {
         if message.contains("unsupported column") {
             return runtime::Error::UnsupportedColumn;
@@ -33,7 +36,7 @@ fn classify(error: &Error) -> runtime::Error {
         FailureCategory::Permission => runtime::Error::Permission,
         FailureCategory::Timeout => runtime::Error::Timeout,
         FailureCategory::Schema => runtime::Error::Schema,
-        FailureCategory::Connectivity => runtime::Error::Unavailable,
+        FailureCategory::Connectivity => runtime::Error::Connection,
         FailureCategory::OversizedRow => runtime::Error::OversizedRow,
         _ => runtime::Error::Configuration,
     }
@@ -285,9 +288,12 @@ async fn serve() -> runtime::Result<()> {
         features: features
             .iter()
             .cloned()
-            .chain(["verified-delete-v1".into()])
+            .chain(["verified-delete-v1".into(), "postgres-ca-v1".into()])
             .collect(),
-        required_host_features: features,
+        required_host_features: features
+            .into_iter()
+            .chain(["safe-diagnostics-v1".into()])
+            .collect(),
         capabilities: Capabilities {
             source: Some(SourceCapabilities {
                 analyze: true,
@@ -356,5 +362,45 @@ async fn serve() -> runtime::Result<()> {
             return Ok(());
         }
         id = id.checked_add(1).ok_or(runtime::Error::Protocol)?;
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    #[test]
+    fn safe_diagnostics_survive_connector_and_host_classification() {
+        for code in [
+            runtime::Error::Tls,
+            runtime::Error::InvalidCa,
+            runtime::Error::UnsupportedFilter,
+        ] {
+            assert_eq!(classify(&Error::Connector(code)), code);
+            let wire = serde_json::to_string(&code).unwrap();
+            let decoded: runtime::Error = serde_json::from_str(&wire).unwrap();
+            let failure = Error::Connector(decoded).failure();
+            assert!(!failure.retryable);
+            assert!(!failure.message.contains("protocol rejected"));
+            assert_eq!(failure.category, FailureCategory::Configuration);
+        }
+        assert!(
+            Error::Connector(runtime::Error::Tls)
+                .failure()
+                .message
+                .contains("--tls-ca-env")
+        );
+        assert!(
+            Error::Connector(runtime::Error::UnsupportedFilter)
+                .failure()
+                .message
+                .contains("text/varchar/char")
+        );
+        assert_eq!(
+            classify(&Error::Postgres {
+                operation: "connect",
+                reason: "connection closed or unavailable"
+            }),
+            runtime::Error::Connection
+        );
     }
 }

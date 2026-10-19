@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 pub struct Options {
     pub confirm_original_source: bool,
     pub max_batches: Option<u64>,
+    pub gateway_batch_size: Option<usize>,
+    pub max_duration_seconds: Option<u64>,
     pub gateway_url: Option<String>,
     pub dataset_id: Option<String>,
     pub token_env: Option<String>,
@@ -31,6 +33,8 @@ pub struct Report {
     pub gateway_mismatches: u64,
     pub gateway_checked: bool,
     pub gateway_lookups: u64,
+    #[serde(default)]
+    pub gateway_requests: u64,
     pub manifest_sha256: Option<String>,
     pub failure: Option<String>,
     #[serde(default)]
@@ -136,6 +140,35 @@ struct Gateway {
     url: url::Url,
     token: String,
 }
+// Reserve room for the response envelope and record identifiers under the 1 MiB
+// response cap. Six bytes bounds JSON escaping of each source UTF-8 byte.
+fn gateway_batch_len(
+    rows: &[Vec<Option<String>>],
+    columns: &[super::batch::ArchiveColumn],
+    limit: usize,
+) -> usize {
+    let names = columns
+        .iter()
+        .map(|c| c.name.len().saturating_mul(6).saturating_add(8))
+        .sum::<usize>();
+    let mut bytes = 0usize;
+    let mut count = 0;
+    for row in rows.iter().take(limit) {
+        let size = row.iter().fold(names.saturating_add(512), |size, value| {
+            size.saturating_add(
+                value
+                    .as_ref()
+                    .map_or(4, |v| v.len().saturating_mul(6).saturating_add(4)),
+            )
+        });
+        if count > 0 && bytes.saturating_add(size) > 768 * 1024 {
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        count += 1;
+    }
+    count
+}
 impl Gateway {
     fn new(options: &Options) -> Result<Option<Self>, Error> {
         if options.gateway_url.is_none()
@@ -166,7 +199,7 @@ impl Gateway {
     async fn lookup(
         &self,
         plan: &super::planner::ArchivePlan,
-        row: &[Option<String>],
+        rows: &[Vec<Option<String>>],
     ) -> Result<Value, Error> {
         let key = plan
             .columns
@@ -174,7 +207,11 @@ impl Gateway {
             .position(|c| c.name == plan.primary_key)
             .ok_or_else(bad)?;
         let columns: Vec<_> = plan.columns.iter().map(|c| &c.name).collect();
-        let query = json!({"columns":columns,"limit":2,"filters":[{"column":plan.primary_key,"op":"=","values":[native(&row[key],&plan.columns[key].postgres_type)?]}]});
+        let values = rows
+            .iter()
+            .map(|row| native(&row[key], &plan.columns[key].postgres_type))
+            .collect::<Result<Vec<_>, _>>()?;
+        let query = json!({"columns":columns,"limit":rows.len() + 1,"filters":[{"column":plan.primary_key,"op":"IN","values":values}]});
         let mut response = self
             .client
             .post(self.url.clone())
@@ -203,6 +240,57 @@ impl Gateway {
         serde_json::from_slice(&bytes).map_err(|_| bad())
     }
 }
+// Match by typed primary key, never by response order. Duplicates, extras,
+// missing keys and truncated responses all fail closed.
+fn batch_mismatches(
+    primary_key: &str,
+    columns: &[super::batch::ArchiveColumn],
+    rows: &[Vec<Option<String>>],
+    response: &Value,
+) -> Result<u64, Error> {
+    let records = response
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(bad)?;
+    if response.get("truncated") != Some(&Value::Bool(false)) || records.len() != rows.len() {
+        return Ok(rows.len() as u64);
+    }
+    let key = columns
+        .iter()
+        .position(|c| c.name == primary_key)
+        .ok_or_else(bad)?;
+    let mut by_key = std::collections::HashMap::new();
+    for record in records {
+        let data = record
+            .get("data")
+            .and_then(Value::as_object)
+            .ok_or_else(bad)?;
+        let value = data.get(primary_key).ok_or_else(bad)?;
+        if by_key.insert(value.to_string(), data).is_some() {
+            return Ok(rows.len() as u64);
+        }
+    }
+    let mut mismatches = 0;
+    for row in rows {
+        if row.len() != columns.len() {
+            return Err(bad());
+        }
+        let expected = native(&row[key], &columns[key].postgres_type)?.to_string();
+        let matches = by_key.remove(&expected).is_some_and(|data| {
+            data.len() == columns.len()
+                && columns.iter().zip(row).all(|(c, value)| {
+                    data.get(&c.name).is_some_and(|actual| {
+                        native(value, &c.postgres_type)
+                            .is_ok_and(|expected| equal(actual, &expected, &c.postgres_type))
+                    })
+                })
+        });
+        if !matches {
+            mismatches += 1;
+        }
+    }
+    Ok(mismatches)
+}
 pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<Report, Error> {
     run_inner(paths, id, options, None, None).await
 }
@@ -213,9 +301,13 @@ pub(crate) async fn run_inner(
     automatic: Option<&super::automatic_shadow::Config>,
     queue: Option<&str>,
 ) -> Result<Report, Error> {
-    if !options.confirm_original_source || options.max_batches == Some(0) {
+    if !options.confirm_original_source
+        || options.max_batches == Some(0)
+        || options.max_duration_seconds == Some(0)
+        || !(1..=100).contains(&options.gateway_batch_size.unwrap_or(64))
+    {
         return Err(Error::Archive(
-            "shadow validation requires stable original source confirmation and positive batch limit",
+            "shadow requires original source confirmation, positive limits, and gateway batch size 1-100",
         ));
     }
     let _job = checkpoint::lock(paths, id)?;
@@ -243,13 +335,26 @@ pub(crate) async fn run_inner(
         gateway_mismatches: 0,
         gateway_checked: options.gateway_url.is_some(),
         gateway_lookups: 0,
+        gateway_requests: 0,
         manifest_sha256: None,
         failure: None,
         automatic_binding: automatic.map(|c| c.binding()).transpose()?,
         retryable: false,
     };
     save(paths, &report)?;
-    let outcome = compare(paths, &job, &options, &mut report, automatic, queue).await;
+    let work = compare(paths, &job, &options, &mut report, automatic, queue);
+    let outcome = if let Some(seconds) = options.max_duration_seconds {
+        match tokio::time::timeout(std::time::Duration::from_secs(seconds), work).await {
+            Ok(result) => result,
+            Err(_) => {
+                report.failure =
+                    Some("shadow duration budget reached; coverage is incomplete".into());
+                Ok(false)
+            }
+        }
+    } else {
+        work.await
+    };
     match outcome {
         Ok(complete) => {
             report.status = if !complete {
@@ -352,40 +457,29 @@ async fn compare(
             report.source_mismatches += 1;
         }
         if let Some(gateway) = &gateway {
-            for row in &archived {
+            let mut remaining = archived.as_slice();
+            while !remaining.is_empty() {
+                let count = gateway_batch_len(
+                    remaining,
+                    &plan.columns,
+                    options.gateway_batch_size.unwrap_or(64),
+                );
+                let (rows, rest) = remaining.split_at(count);
                 if stopped(paths, options, queue)? {
                     return Ok(false);
                 }
                 crate::protection::boundary(paths, &job.plan.policy.source, &options.shutdown)
                     .await?;
-                let response = gateway.lookup(&plan, row).await?;
-                report.gateway_lookups += 1;
-                let records = response
-                    .get("records")
-                    .and_then(Value::as_array)
-                    .ok_or_else(bad)?;
-                let mut matches =
-                    records.len() == 1 && response.get("truncated") == Some(&Value::Bool(false));
-                if matches {
-                    let data = records[0]
-                        .get("data")
-                        .and_then(Value::as_object)
-                        .ok_or_else(bad)?;
-                    matches = data.len() == plan.columns.len();
-                    for (c, value) in plan.columns.iter().zip(row) {
-                        if !data.get(&c.name).is_some_and(|actual| {
-                            native(value, &c.postgres_type)
-                                .is_ok_and(|expected| equal(actual, &expected, &c.postgres_type))
-                        }) {
-                            matches = false;
-                        }
-                    }
-                }
-                if !matches {
-                    report.gateway_mismatches += 1;
-                }
+                report.gateway_requests += 1;
+                let response = gateway.lookup(&plan, rows).await?;
+                report.gateway_lookups += rows.len() as u64;
+                report.gateway_mismatches +=
+                    batch_mismatches(&plan.primary_key, &plan.columns, rows, &response)?;
+                save(paths, report)?;
+                remaining = rest;
             }
         }
+
         report.rows += archived.len() as u64;
         report.batches += 1;
         last = Some(entry.batch.last_key);
@@ -409,6 +503,51 @@ fn stopped(paths: &StatePaths, options: &Options, queue: Option<&str>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_rows_reduce_batch_size_without_exceeding_key_limit() {
+        let columns = vec![super::super::batch::ArchiveColumn {
+            name: "payload".into(),
+            postgres_type: "text".into(),
+            nullable: false,
+        }];
+        let narrow = vec![vec![Some("value".into())]; 100];
+        assert_eq!(gateway_batch_len(&narrow, &columns, 64), 64);
+        let wide = vec![vec![Some("\\".repeat(65536))]; 64];
+        assert_eq!(gateway_batch_len(&wide, &columns, 64), 1);
+        assert_eq!(gateway_batch_len(&narrow[..3], &columns, 64), 3);
+    }
+    #[test]
+    fn batched_gateway_checks_match_keys_and_fail_closed() {
+        let columns = vec![
+            super::super::batch::ArchiveColumn {
+                name: "id".into(),
+                postgres_type: "int8".into(),
+                nullable: false,
+            },
+            super::super::batch::ArchiveColumn {
+                name: "amount".into(),
+                postgres_type: "numeric".into(),
+                nullable: true,
+            },
+        ];
+        let rows = vec![
+            vec![Some("1".into()), Some("1.2300".into())],
+            vec![Some("2".into()), None],
+        ];
+        let good = json!({"truncated":false,"records":[{"data":{"id":2,"amount":null}},{"data":{"id":1,"amount":"1.2300"}}]});
+        assert_eq!(batch_mismatches("id", &columns, &rows, &good).unwrap(), 0);
+        for bad in [
+            json!({"truncated":true,"records":good["records"]}),
+            json!({"truncated":false,"records":[good["records"][0].clone()]}),
+            json!({"truncated":false,"records":[good["records"][0].clone(),good["records"][0].clone()]}),
+            json!({"truncated":false,"records":[{"data":{"id":3,"amount":null}},{"data":{"id":1,"amount":"1.2300"}}]}),
+            json!({"truncated":false,"records":[{"data":{"id":2,"amount":null}},{"data":{"id":1,"amount":1.23}}]}),
+            json!({"truncated":false,"records":[{"data":{"id":2}},{"data":{"id":1,"amount":"1.2300"}}]}),
+        ] {
+            assert!(batch_mismatches("id", &columns, &rows, &bad).unwrap() > 0);
+        }
+        assert!(batch_mismatches("id", &columns, &rows, &json!({})).is_err());
+    }
     #[test]
     fn comparisons_preserve_precision_and_native_text() {
         assert!(equal(

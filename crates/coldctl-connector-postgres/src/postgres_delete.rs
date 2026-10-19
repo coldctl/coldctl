@@ -1,4 +1,4 @@
-//! Compare and delete only supplied archived keys, atomically per batch.
+//! Delete supplied archived keys transactionally; verify returned values before commit.
 use crate::{
     postgres::{PostgresSource, Session, postgres_error},
     postgres_archive::{inspect, quote_identifier as quote, validate_signature},
@@ -70,7 +70,7 @@ impl DeleteSession {
         {
             return Err(Error::Archive("invalid deletion batch size"));
         }
-        let mut keys = std::collections::BTreeSet::new();
+        let mut expected_by_key = std::collections::BTreeMap::new();
         for row in rows {
             if row.len() != plan.columns.len()
                 || row.iter().flatten().map(String::len).sum::<usize>() > 65536
@@ -81,7 +81,7 @@ impl DeleteSession {
                 .as_ref()
                 .and_then(|s| s.parse::<i64>().ok())
                 .ok_or_else(changed)?;
-            if !keys.insert(key) {
+            if expected_by_key.insert(key, row).is_some() {
                 return Err(changed());
             }
         }
@@ -91,10 +91,11 @@ impl DeleteSession {
             quote(&plan.policy.config.table)
         );
         let tx = self.session.client.transaction().await.map_err(pg)?;
-        // Bound the write exclusion to one batch. This prevents row changes and
-        // DDL/trigger/FK changes without requiring UPDATE privileges for row locks.
+        // Protect the schema/trigger/FK checks while permitting ordinary writers.
+        // This still conflicts with VACUUM, concurrent index work and other
+        // schema guards, so keep it bounded to one batch and retain lock_timeout.
         tx.batch_execute(&format!(
-            "LOCK TABLE {relation} IN SHARE ROW EXCLUSIVE MODE"
+            "LOCK TABLE {relation} IN SHARE UPDATE EXCLUSIVE MODE"
         ))
         .await
         .map_err(pg)?;
@@ -127,28 +128,27 @@ impl DeleteSession {
             .collect::<Vec<_>>()
             .join(",");
         let json = format!("pg_catalog.array_to_json(ARRAY[{values}])::text");
-        let select = tx.prepare(&format!("SELECT CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END FROM {relation} WHERE {}=$1::text::bigint", quote(&key))).await.map_err(pg)?;
-        let delete = tx
-            .prepare(&format!(
-                "DELETE FROM {relation} WHERE {}=$1::text::bigint",
-                quote(&key)
-            ))
+        // DELETE locks only affected rows and RETURNING captures the exact version
+        // deleted, including a concurrently committed update. Compare all values
+        // before COMMIT; any mismatch rolls back the entire batch. Do not use a
+        // separate unlocked SELECT (TOCTOU), or SKIP LOCKED (not evidence of absence).
+        // Triggers, rules, incoming FKs and RLS were rejected under the schema guard.
+        let keys: Vec<i64> = expected_by_key.keys().copied().collect();
+        let deleted = tx
+            .query(
+                &format!("DELETE FROM {relation} WHERE {key}=ANY($1::bigint[]) RETURNING {key}::bigint, CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END", key = quote(&key)),
+                &[&keys],
+            )
             .await
             .map_err(pg)?;
-        let mut result = DeleteBatchResult {
-            deleted: 0,
-            absent: 0,
-        };
-        for expected in rows {
-            let Some(row) = tx
-                .query_opt(&select, &[&expected[key_index]])
-                .await
-                .map_err(pg)?
-            else {
-                result.absent += 1;
-                continue;
-            };
-            let json: Option<String> = row.get(0);
+        let mut present = std::collections::BTreeSet::new();
+        for row in deleted {
+            let id: i64 = row.get(0);
+            let expected = expected_by_key.get(&id).ok_or_else(changed)?;
+            if !present.insert(id) {
+                return Err(changed());
+            }
+            let json: Option<String> = row.get(1);
             let actual: Vec<Option<String>> =
                 serde_json::from_str(&json.ok_or_else(changed)?).map_err(|_| changed())?;
             if actual.len() != expected.len()
@@ -158,16 +158,11 @@ impl DeleteSession {
             {
                 return Err(changed());
             }
-            if tx
-                .execute(&delete, &[&expected[key_index]])
-                .await
-                .map_err(pg)?
-                != 1
-            {
-                return Err(changed());
-            }
-            result.deleted += 1;
         }
+        let result = DeleteBatchResult {
+            deleted: present.len() as u64,
+            absent: (keys.len() - present.len()) as u64,
+        };
         tx.commit().await.map_err(pg)?;
         Ok(result)
     }

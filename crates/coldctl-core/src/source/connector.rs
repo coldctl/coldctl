@@ -136,6 +136,7 @@ pub async fn launch_pinned(
             "connector version or digest changed; restore the pinned executable before resume",
         ));
     }
+    require_ca_support(&client, engine, &resolved)?;
     let _: () = client
         .call(Request::Configure(resolved), 15_000, false)
         .await?;
@@ -168,17 +169,40 @@ pub async fn launch_in_state(
         ));
     }
     client.retain_package_lease(selected.lease);
+    let resolved = connection.resolve()?;
+    require_ca_support(&client, connection.engine(), &resolved)?;
     client
-        .call::<_, ()>(Request::Configure(connection.resolve()?), 15_000, false)
+        .call::<_, ()>(Request::Configure(resolved), 15_000, false)
         .await?;
     Ok(client)
 }
 
+fn require_ca_support(
+    client: &Client,
+    engine: &str,
+    resolved: &ResolvedConnection,
+) -> Result<(), Error> {
+    if engine == "postgres"
+        && resolved.ca_pem.is_some()
+        && !client.hello.features.contains("postgres-ca-v1")
+    {
+        return Err(Error::SourceConfiguration(
+            "PostgreSQL connector does not support custom CA bundles; upgrade the connector before using --tls-ca-env",
+        ));
+    }
+    Ok(())
+}
+
 pub fn host_features() -> std::collections::BTreeSet<String> {
-    ["legacy-postgres-v2", "mysql-text-v1", "mongodb-bson-v1"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    [
+        "legacy-postgres-v2",
+        "mysql-text-v1",
+        "mongodb-bson-v1",
+        "safe-diagnostics-v1",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 pub fn engine_features(engine: &str) -> std::collections::BTreeSet<String> {

@@ -28,6 +28,14 @@ fn failure(operation: &'static str, reason: &'static str) -> Error {
 /// Raw server/driver errors may contain credentials or sensitive SQL literals.
 /// Expose an actionable category without retaining their text in the error chain.
 pub(super) fn postgres_error(operation: &'static str, error: tokio_postgres::Error) -> Error {
+    // Inspect typed causes only: raw server/TLS text may contain private values.
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = cause {
+        if current.is::<native_tls::Error>() {
+            return Error::Connector(coldctl_connector_runtime::Error::Tls);
+        }
+        cause = current.source();
+    }
     let reason = match error.code().map(|code| code.code()) {
         Some("28P01" | "28000") => {
             "authentication rejected; check the user and credential environment variable"
@@ -54,6 +62,36 @@ pub(super) fn postgres_error(operation: &'static str, error: tokio_postgres::Err
         }
     };
     failure(operation, reason)
+}
+
+fn tls_connector(
+    connection: &coldctl_core::source::config::ResolvedConnection,
+) -> Result<native_tls::TlsConnector, Error> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if let Some(pem) = &connection.ca_pem {
+        let invalid = || Error::Connector(coldctl_connector_runtime::Error::InvalidCa);
+        if connection.tls != TlsMode::Require || pem.len() > 65536 || pem.trim().is_empty() {
+            return Err(invalid());
+        }
+        // A configured bundle defines this source's roots, without changing OS trust.
+        builder.disable_built_in_roots(true);
+        let mut rest = pem.trim();
+        while !rest.is_empty() {
+            if !rest.starts_with("-----BEGIN CERTIFICATE-----") {
+                return Err(invalid());
+            }
+            let end = rest.find("-----END CERTIFICATE-----").ok_or_else(invalid)?
+                + "-----END CERTIFICATE-----".len();
+            let cert = native_tls::Certificate::from_pem(&rest.as_bytes()[..end])
+                .map_err(|_| invalid())?;
+            builder.add_root_certificate(cert);
+            rest = rest[end..].trim();
+        }
+    }
+    // Hostname/certificate verification and required TLS stay enabled.
+    builder
+        .build()
+        .map_err(|_| Error::Connector(coldctl_connector_runtime::Error::Tls))
 }
 
 fn transient_io(error: &(dyn std::error::Error + 'static)) -> bool {
@@ -109,9 +147,7 @@ impl PostgresSource {
         if let Some(password) = &resolved.password {
             config.password(password);
         }
-        // Native TLS verifies both the certificate chain and hostname using the OS trust store.
-        let tls = native_tls::TlsConnector::new()
-            .map_err(|_| failure("connect", "unable to initialize the system TLS provider"))?;
+        let tls = tls_connector(resolved)?;
         let (client, connection) = timeout(
             Duration::from_secs(10),
             config.connect(postgres_native_tls::MakeTlsConnector::new(tls)),
@@ -314,6 +350,85 @@ impl DataSource for PostgresSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_connection(pem: Option<String>) -> coldctl_core::source::config::ResolvedConnection {
+        let mut connection = coldctl_core::source::SourceConnection::from_url(
+            "postgres://reader@localhost/db",
+            None,
+        )
+        .unwrap()
+        .resolve()
+        .unwrap();
+        connection.ca_pem = pem;
+        connection
+    }
+
+    #[test]
+    fn custom_ca_rejects_paths_garbage_and_partial_bundles() {
+        let valid = include_str!("../tests/fixtures/ca.pem");
+        for pem in [
+            "".to_owned(),
+            "PRIVATE_SENTINEL.pem".to_owned(),
+            format!("{valid}\nPRIVATE_SENTINEL"),
+            "-----BEGIN CERTIFICATE-----\nPRIVATE_SENTINEL\n-----END CERTIFICATE-----".to_owned(),
+            "x".repeat(65537),
+        ] {
+            let error = tls_connector(&test_connection(Some(pem))).err().unwrap();
+            assert!(matches!(
+                error,
+                Error::Connector(coldctl_connector_runtime::Error::InvalidCa)
+            ));
+            assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
+        }
+        let mut disabled = test_connection(Some(valid.into()));
+        disabled.tls = TlsMode::Disable;
+        assert!(tls_connector(&disabled).is_err());
+        assert!(tls_connector(&test_connection(Some(format!("{valid}\n{valid}")))).is_ok());
+    }
+
+    #[test]
+    fn custom_ca_handshake_keeps_hostname_and_trust_verification() {
+        // Synthetic test-only identity: never installed in the OS trust store.
+        use std::net::{TcpListener, TcpStream};
+        let identity = native_tls::Identity::from_pkcs12(
+            include_bytes!("../tests/fixtures/identity.p12"),
+            "coldctl-test-only",
+        )
+        .unwrap();
+        let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
+        for (custom_ca, hostname, succeeds) in [
+            (true, "localhost", true),
+            (false, "localhost", false),
+            (true, "wrong.example", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let acceptor = acceptor.clone();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let _ = acceptor.accept(stream);
+            });
+            let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let pem = custom_ca.then(|| include_str!("../tests/fixtures/ca.pem").to_owned());
+            let result = tls_connector(&test_connection(pem))
+                .unwrap()
+                .connect(hostname, stream);
+            assert_eq!(result.is_ok(), succeeds);
+            server.join().unwrap();
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires COLDCTL_TEST_POSTGRES_URL pointing to a disposable PostgreSQL database"]

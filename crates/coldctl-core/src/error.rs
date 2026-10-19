@@ -103,6 +103,41 @@ impl Error {
                     C::Schema => (Schema, false, "connector identity or schema changed"),
                     C::Timeout => (Timeout, true, "connector operation timed out"),
                     C::Unavailable => (Connectivity, true, "connector unavailable or exited"),
+                    C::Tls => (
+                        Configuration,
+                        false,
+                        "TLS handshake or certificate validation failed; check the server hostname and trusted CA, or configure --tls-ca-env with the provider CA PEM",
+                    ),
+                    C::InvalidCa => (
+                        Configuration,
+                        false,
+                        "invalid TLS CA bundle; --tls-ca-env must reference PEM certificate contents, not a file path; TLS must be enabled",
+                    ),
+                    C::UnsupportedFilter => (
+                        Configuration,
+                        false,
+                        "PostgreSQL --equals-column must name a text/varchar/char column; numeric equality filters are not supported",
+                    ),
+                    C::Connection => (
+                        Connectivity,
+                        true,
+                        "database connection failed; check host, port, DNS, firewall and server availability",
+                    ),
+                    C::Protocol => (
+                        Configuration,
+                        false,
+                        "connector protocol or capability mismatch; check compatible agent/connector versions and reinstall the approved package",
+                    ),
+                    C::UnsupportedColumn => (
+                        Configuration,
+                        false,
+                        "unsupported column type in archive source; review the connector's supported types",
+                    ),
+                    C::RowSecurity => (
+                        Configuration,
+                        false,
+                        "row-level security is unsupported for archival",
+                    ),
                     C::OversizedRow => {
                         (OversizedRow, false, "row exceeds the 64 KiB archive limit")
                     }

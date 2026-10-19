@@ -13,7 +13,7 @@ pub struct SchedulerArgs {
 }
 #[derive(Subcommand)]
 pub enum Command {
-    /// Continuously archive and delete eligible records to S3 at a fixed delay.
+    /// Continuously archive and delete eligible records to S3 or Azure Blob at a fixed delay.
     Recurring {
         #[command(subcommand)]
         command: RecurringCommand,
@@ -67,7 +67,7 @@ pub enum Command {
 pub enum RecurringCommand {
     /// Authorize repeated archive/verify/delete cycles until stopped.
     Create {
-        /// Existing retention policy using PostgreSQL/MongoDB and an S3 destination.
+        /// Existing retention policy using PostgreSQL/MySQL/MongoDB and an S3 or Azure Blob destination.
         policy: String,
         /// Delay after completed deletion before the next cycle (60..31536000 seconds).
         #[arg(long)]

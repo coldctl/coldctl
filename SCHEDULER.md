@@ -4,29 +4,30 @@ The local scheduler persists a queue in `state.db` and runs each requested archi
 to completion using the existing archive checkpoints. It supports delayed starts,
 automatic resume after a worker restart, and bounded retries for transient errors.
 It deletes PostgreSQL, MySQL or MongoDB source records only with explicit `--delete-after-archive`
-authorization; see [verified deletion](DELETION.md). Recurring PostgreSQL and MongoDB
-archives to S3 are available through the explicitly authorized recurring workflow below.
+authorization; see [verified deletion](DELETION.md). Recurring PostgreSQL, MySQL and MongoDB
+archives to S3 or Azure Blob are available through the explicitly authorized recurring workflow below.
 Ordinary `enqueue --allow-repeat` still acknowledges possible duplicate exports.
 
 ## Recurring archive and verified deletion
 
-Run `coldctl init` to upgrade to schema 16. Create policies using an S3 destination,
+Run `coldctl init` to upgrade to schema 16. Create policies using an S3 or Azure Blob destination,
 then explicitly authorize recurring deletion for each policy:
 
 ```powershell
 coldctl agent scheduler recurring create pg_orders --every-seconds 86400 --source-stability immutable-rows --confirm-original-source --delete-after-archive
 coldctl agent scheduler recurring create mongo_events --every-seconds 86400 --source-stability quiescent-copy --confirm-original-source --delete-after-archive
+coldctl agent scheduler recurring create mysql_events --every-seconds 86400 --source-stability quiescent-copy --confirm-original-source --delete-after-archive
 coldctl agent scheduler run
 ```
 
 The worker runs in the foreground until interrupted. Install it with your service
 manager for unattended operation, using the same data directory, connector packages,
-database credentials and AWS credential environment on every restart. This does not
+database credentials and destination credential environment on every restart. This does not
 install a service or change customer databases merely by registering a schedule.
 
 Each schedule admits one cycle immediately. It freezes a UTC cutoff calculated as
 admission time minus the policy's retention days, then exports, publishes and verifies
-S3 objects, runs automatic gateway shadow validation when configured in the source
+destination objects, runs automatic gateway shadow validation when configured in the source
 protection policy, and deletes matching unchanged source records through the existing bounded
 deletion path. Subsequent cycles start no sooner than the configured delay after the
 worker observes successful deletion completion. Missed intervals coalesce into one
@@ -41,10 +42,12 @@ after confirmed deletion can produce another archived version. Index the retenti
 predicate appropriately and measure source impact.
 
 The stable-source contracts still apply for the entire cycle, including downtime and
-retries: PostgreSQL eligible rows and membership must remain stable; MongoDB requires
-a quiescent collection. No automatic application write fence is installed. Do not use
-this feature to assert snapshot consistency for a continuously changing MongoDB
-collection. Source identity/schema drift or changed archived rows fail closed.
+retries: PostgreSQL eligible rows and membership must remain stable; MySQL and MongoDB
+require `quiescent-copy` for each complete cycle. No automatic application write fence
+is installed. Do not use this contract to claim snapshot consistency for a continuously
+changing source. Source identity/schema drift or changed archived rows fail closed.
+MySQL uses its verified InnoDB row-locking deletion path and native UTC DATETIME
+cutoff representation; the queue retains the original RFC3339 admission timestamp.
 
 The policy, source configuration and destination configuration are frozen at schedule
 creation; changed configuration blocks a new cycle. Credential values can rotate
@@ -69,7 +72,7 @@ same cycle. A cancelled cycle cannot be skipped by retrying the schedule.
 
 Ctrl+C stops the worker safely and allows restart. `recurring stop` is terminal: it
 prevents further admissions and cancels queued work, with an in-flight batch allowed
-to commit. Already deleted rows are not restored. Preserve state backups and S3 data.
+to commit. Already deleted rows are not restored. Preserve state backups and destination data.
 The initial interface keeps stopped schedule history and reserves its policy ID;
 recover any incomplete cycle manually and use a deliberately reviewed new policy
 to enroll again. Scheduling supports one worker per state directory, not multiple
@@ -90,6 +93,29 @@ deleted, all six S3 archives verified, and stopping prevented new admissions.
 The script closes its temporary SQLite connections before Windows cleanup and
 removes only its uniquely named source tables/collections. The CI workflow runs
 this fixture separately. Real AWS and production-scale qualification remain pending.
+
+### Azure validation (2026-10-16)
+
+A separate disposable Aiven PostgreSQL table completed three real Azure Blob
+cycles using 60-second intervals: two old rows, a late lower-key arrival, then an
+empty cycle. Restarting the worker between slices retained each job and cutoff.
+All three archives verified, deletion checkpoints accounted for three rows, and
+stopping prevented a fourth cycle after the next due time. The existing 5,109-row
+table retained its exact content fingerprint. This was bounded functional
+validation with account-key authentication, without automatic Gateway shadow
+gating; production load, crash/soak behavior and MongoDB-to-Azure remain unqualified.
+
+### MySQL Azure validation (2026-10-17)
+
+A separate Aiven MySQL 8.4 table completed three real 60-second recurring cycles
+to Azure: two old rows, one late lower-key row, and an empty cycle. The first
+cycle resumed one-row slices across worker processes with unchanged job/cutoff;
+later cycles used one continuous worker. All archives and deletion checkpoints
+verified. Stopping prevented a fourth admission and preserved a newly inserted
+old row beyond the next due time. The schedule and worker were stopped after
+the test. Use `demo/mysql-trial/test.ps1 -Recurring` from the parent workspace
+to repeat this isolated fixture. This is bounded functional validation without
+automatic Gateway shadow gating, not production-load or long-term qualification.
 
 ## Start an archive
 

@@ -90,16 +90,18 @@ pub fn create(
     let _guard = crate::archive::checkpoint::policy_lock(paths, &p.id)?;
     let s = super::sources::show(paths, &p.source)?;
     let d = super::destinations::show(paths, &p.destination)?;
-    if !matches!(s.source_type.as_str(), "postgres" | "mongodb") || d.destination_type != "s3" {
+    if !matches!(s.source_type.as_str(), "postgres" | "mysql" | "mongodb")
+        || !matches!(d.destination_type.as_str(), "s3" | "azure")
+    {
         return Err(Error::Archive(
-            "recurring currently supports PostgreSQL or MongoDB to S3",
+            "recurring supports PostgreSQL, MySQL or MongoDB to S3 or Azure Blob",
         ));
     }
-    if s.source_type == "mongodb"
+    if matches!(s.source_type.as_str(), "mysql" | "mongodb")
         && !matches!(options.source_stability, SourceStability::QuiescentCopy)
     {
         return Err(Error::Archive(
-            "MongoDB recurring requires a quiescent source for each complete cycle",
+            "MySQL and MongoDB recurring require a quiescent source for each complete cycle",
         ));
     }
     ensure_prior_deleted(paths, &p.id)?;
@@ -253,7 +255,16 @@ pub(crate) fn guard_plan(
             ));
         }
     }
-    plan.cutoff_utc = cutoff;
+    // Queue timestamps remain UTC RFC3339. MySQL binds a DATETIME literal in a
+    // UTC session, matching its native planner (no RFC3339 timezone suffix).
+    plan.cutoff_utc = if super::sources::show(paths, &plan.policy.source)?.source_type == "mysql" {
+        cutoff
+            .strip_suffix('Z')
+            .ok_or(Error::Archive("invalid recurring UTC cutoff"))?
+            .replace('T', " ")
+    } else {
+        cutoff
+    };
     Ok(())
 }
 pub fn stop(paths: &StatePaths, id: &str) -> Result<Schedule, Error> {
@@ -314,33 +325,67 @@ mod tests {
     };
 
     fn fixture() -> (tempfile::TempDir, StatePaths, scheduler::Options) {
+        fixture_for(false)
+    }
+
+    fn fixture_for(azure: bool) -> (tempfile::TempDir, StatePaths, scheduler::Options) {
+        fixture_engine(azure, false)
+    }
+    fn fixture_engine(
+        azure: bool,
+        mysql: bool,
+    ) -> (tempfile::TempDir, StatePaths, scheduler::Options) {
         let temp = tempfile::tempdir().unwrap();
         let paths = StatePaths::resolve(Some(temp.path())).unwrap();
         state::initialize(&paths, "test").unwrap();
         state::sources::add(
             &paths,
             "source",
-            SourceConnection::from_url_env("UNUSED_RECURRING_URL".into()).unwrap(),
+            if mysql {
+                SourceConnection::from_mysql_url_env("UNUSED_RECURRING_URL".into()).unwrap()
+            } else {
+                SourceConnection::from_url_env("UNUSED_RECURRING_URL".into()).unwrap()
+            },
         )
         .unwrap();
-        state::destinations::add_remote(
-            &paths,
-            "s3",
-            &temp.path().join("staging"),
-            S3Config {
-                role_auth: false,
-                bucket: "test-archives".into(),
-                region: "us-east-1".into(),
-                prefix: "test".into(),
-                endpoint: None,
-                access_key_env: "UNUSED_ACCESS".into(),
-                secret_key_env: "UNUSED_SECRET".into(),
-                session_token_env: None,
-                allow_http: false,
-            }
-            .into(),
-        )
-        .unwrap();
+        if azure {
+            state::destinations::add_remote(
+                &paths,
+                "s3",
+                &temp.path().join("staging"),
+                crate::destination::azure::AzureConfig {
+                    account: "testaccount".into(),
+                    container: "test-archives".into(),
+                    prefix: "test".into(),
+                    endpoint: None,
+                    account_key_env: "UNUSED_AZURE_KEY".into(),
+                    managed_identity: false,
+                    managed_identity_client_id: None,
+                    allow_http: false,
+                }
+                .into(),
+            )
+            .unwrap();
+        } else {
+            state::destinations::add_remote(
+                &paths,
+                "s3",
+                &temp.path().join("staging"),
+                S3Config {
+                    role_auth: false,
+                    bucket: "test-archives".into(),
+                    region: "us-east-1".into(),
+                    prefix: "test".into(),
+                    endpoint: None,
+                    access_key_env: "UNUSED_ACCESS".into(),
+                    secret_key_env: "UNUSED_SECRET".into(),
+                    session_token_env: None,
+                    allow_http: false,
+                }
+                .into(),
+            )
+            .unwrap();
+        }
         archive::policy_create(
             &paths,
             "orders",
@@ -405,6 +450,73 @@ mod tests {
         scheduler::finish(paths, &q.id, "completed", scheduler::now(), 0, None).unwrap();
         job.id
     }
+    #[test]
+    fn mysql_recurring_requires_quiescence_and_retains_cutoff_and_deletion_gate() {
+        for azure in [false, true] {
+            let (_temp, paths, mut options) = fixture_engine(azure, true);
+            assert!(create(&paths, "orders", 60, options.clone()).is_err());
+            options.source_stability = SourceStability::QuiescentCopy;
+            let schedule = create(&paths, "orders", 60, options).unwrap();
+            admit(&paths, schedule.next_due).unwrap();
+            let queue = scheduler::claim(&paths, schedule.next_due)
+                .unwrap()
+                .unwrap();
+            let cutoff: String = open(&paths, false)
+                .unwrap()
+                .query_row(
+                    "SELECT cutoff_utc FROM archive_queue WHERE id=?1",
+                    [&queue.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            scheduler::recover(&paths).unwrap();
+            let recovered = scheduler::claim(&paths, schedule.next_due + 10)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered.id, queue.id);
+            let job = complete(&paths, &recovered, true);
+            assert_eq!(
+                archive::job_show(&paths, &job).unwrap().plan.cutoff_utc,
+                cutoff.trim_end_matches('Z').replace('T', " ")
+            );
+            admit(&paths, schedule.next_due + 10).unwrap();
+            admit(&paths, schedule.next_due + 70).unwrap();
+            let next = scheduler::claim(&paths, schedule.next_due + 70)
+                .unwrap()
+                .unwrap();
+            complete(&paths, &next, false);
+            admit(&paths, schedule.next_due + 71).unwrap();
+            assert_eq!(show(&paths, &schedule.id).unwrap().status, "failed");
+            stop(&paths, &schedule.id).unwrap();
+            admit(&paths, schedule.next_due + 1000).unwrap();
+            assert_eq!(scheduler::list(&paths).unwrap().len(), 2);
+        }
+    }
+    #[test]
+    fn azure_cycles_require_deletion_evidence_and_stop_prevents_admission() {
+        let (_temp, paths, options) = fixture_for(true);
+        let schedule = create(&paths, "orders", 60, options).unwrap();
+        admit(&paths, schedule.next_due).unwrap();
+        let queue = scheduler::claim(&paths, schedule.next_due)
+            .unwrap()
+            .unwrap();
+        complete(&paths, &queue, true);
+        admit(&paths, schedule.next_due + 1).unwrap();
+        assert_eq!(show(&paths, &schedule.id).unwrap().cycles, 1);
+        admit(&paths, schedule.next_due + 60).unwrap();
+        assert_eq!(scheduler::list(&paths).unwrap().len(), 1);
+        admit(&paths, schedule.next_due + 61).unwrap();
+        let next = scheduler::claim(&paths, schedule.next_due + 61)
+            .unwrap()
+            .unwrap();
+        complete(&paths, &next, false);
+        admit(&paths, schedule.next_due + 62).unwrap();
+        assert_eq!(show(&paths, &schedule.id).unwrap().status, "failed");
+        stop(&paths, &schedule.id).unwrap();
+        admit(&paths, schedule.next_due + 1000).unwrap();
+        assert_eq!(scheduler::list(&paths).unwrap().len(), 2);
+    }
+
     #[test]
     fn frozen_windows_restart_delay_and_late_arrival_rescan() {
         let (_t, p, o) = fixture();

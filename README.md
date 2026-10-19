@@ -20,6 +20,23 @@ This is an active-development release candidate. Verified PostgreSQL, MySQL and 
 is opt-in. General archive querying and mutable-source snapshot consistency are not implemented. Production
 qualification remains in progress. See [distribution](#distribution).
 
+PostgreSQL verified deletion uses one `DELETE ... RETURNING` per bounded batch
+and compares the exact deleted row versions against the verified archive before
+committing. Any mismatch rolls back the entire batch; missing rows are counted
+for safe replay. A `SHARE UPDATE EXCLUSIVE` table lock protects schema and safety
+checks while allowing ordinary writes to unrelated rows. Target rows remain
+locked until commit, and the table guard can contend with VACUUM and DDL.
+The two-second lock timeout bounds lock waits. Archive integrity, source identity,
+schema, trigger and foreign-key checks still apply.
+
+MySQL verified deletion uses a READ COMMITTED InnoDB transaction, bounded
+primary-key locking reads and one bulk delete per batch. Metadata locks protect
+schema, trigger and incoming foreign-key checks while permitting unrelated DML.
+Only locked rows whose complete values match the archive are deleted; mismatches
+roll back the batch. Target-row writers and DDL can still contend. Direct TRIGGER
+and PROCESS privileges are required for safety inspection. Unrelated database
+privilege revokes are accepted; target-database or ambiguous revokes fail closed.
+
 ## Get started
 
 Once a release is published, download a Windows or Linux binary from [GitHub Releases](https://github.com/coldctl/coldctl/releases).
@@ -95,6 +112,32 @@ archive operations, and `coldctl-cloud` implements optional metadata sync.
 [Apache-2.0](LICENSE)
 
 ### Optional PostgreSQL connector
+
+For a managed PostgreSQL service with a private CA, load its PEM certificate
+contents into an environment variable and reference it when adding the source:
+
+```powershell
+$env:COLDCTL_POSTGRES_CA = Get-Content 'C:\certificates\provider-ca.pem' -Raw
+coldctl source add postgres --name managed-pg --url 'postgres://reader@db.example.com:5432/app?sslmode=require' --password-env PG_PASSWORD --tls-ca-env COLDCTL_POSTGRES_CA
+coldctl source test managed-pg
+```
+
+Only the environment variable name is saved. Supply the same variable to the
+worker on each restart. The variable contains PEM text, not a filename. Bundles
+may contain multiple certificates, up to 64 KiB. A configured bundle supplies
+the source's trusted roots without modifying the operating system's trust store;
+without a bundle, system roots remain the default. Hostname and certificate
+verification stay enabled. Custom CAs cannot be combined with `sslmode=disable`.
+Both password-free `--url` and full credential `--url-env` sources support this.
+
+Use an updated agent and PostgreSQL connector together. The connector advertises
+`postgres-ca-v1` and requires host support for `safe-diagnostics-v1`; an older
+connector is rejected when custom CA configuration would otherwise be ignored.
+Existing source configurations without CA references remain compatible.
+TLS trust failures, malformed CA bundles, database connectivity failures and
+unsupported PostgreSQL equality-filter types have distinct, sanitized errors.
+Policy `--equals-column` still supports text/varchar/char only; this change
+improves its error message rather than adding numeric equality filtering.
 
 Database commands now require the separate `coldctl-connector-postgres` executable.
 For development, run `cargo build --workspace`, set

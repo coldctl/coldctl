@@ -13,6 +13,8 @@ pub enum SourceConnection {
         user: String,
         tls: TlsMode,
         password_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
     },
     Mysql {
         host: String,
@@ -46,6 +48,8 @@ pub enum SourceConnection {
     },
     UrlEnv {
         variable: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_env: Option<String>,
     },
 }
 
@@ -233,6 +237,7 @@ impl SourceConnection {
             user: parsed.user,
             tls: parsed.tls,
             password_env,
+            ca_env: None,
         };
         connection.validate()?;
         Ok(connection)
@@ -246,13 +251,9 @@ impl SourceConnection {
             Self::Mongodb { ca_env, .. }
             | Self::MongodbUrlEnv { ca_env, .. }
             | Self::Mysql { ca_env, .. }
-            | Self::MysqlUrlEnv { ca_env, .. } => *ca_env = ca,
-            _ if ca.is_some() => {
-                return Err(Error::SourceConfiguration(
-                    "--tls-ca-env currently applies to MySQL and MongoDB",
-                ));
-            }
-            _ => {}
+            | Self::MysqlUrlEnv { ca_env, .. }
+            | Self::Postgres { ca_env, .. }
+            | Self::UrlEnv { ca_env, .. } => *ca_env = ca,
         }
         Ok(self)
     }
@@ -281,11 +282,20 @@ impl SourceConnection {
 
     pub fn from_url_env(variable: String) -> Result<Self, Error> {
         validate_env(&variable)?;
-        Ok(Self::UrlEnv { variable })
+        Ok(Self::UrlEnv {
+            variable,
+            ca_env: None,
+        })
     }
 
     pub fn validate(&self) -> Result<(), Error> {
-        if let Self::Mongodb {
+        if let Self::Postgres {
+            ca_env: Some(v), ..
+        }
+        | Self::UrlEnv {
+            ca_env: Some(v), ..
+        }
+        | Self::Mongodb {
             ca_env: Some(v), ..
         }
         | Self::MongodbUrlEnv {
@@ -302,7 +312,7 @@ impl SourceConnection {
         }
         match self {
             Self::MongodbUrlEnv { variable, .. }
-            | Self::UrlEnv { variable }
+            | Self::UrlEnv { variable, .. }
             | Self::MysqlUrlEnv { variable, .. } => validate_env(variable),
             Self::Mongodb {
                 host,
@@ -354,7 +364,7 @@ impl SourceConnection {
         };
         let mut resolved = match self {
             Self::MongodbUrlEnv { variable, .. }
-            | Self::UrlEnv { variable }
+            | Self::UrlEnv { variable, .. }
             | Self::MysqlUrlEnv { variable, .. } => {
                 parse_url(&environment(variable)?, true, self.engine())
             }
@@ -383,6 +393,7 @@ impl SourceConnection {
                 user,
                 tls,
                 password_env,
+                ..
             } => Ok(ResolvedConnection {
                 host: host.clone(),
                 port: *port,
@@ -393,7 +404,15 @@ impl SourceConnection {
                 password: password_env.as_deref().map(environment).transpose()?,
             }),
         }?;
-        if let Self::Mongodb {
+        if let Self::Postgres {
+            ca_env: Some(variable),
+            ..
+        }
+        | Self::UrlEnv {
+            ca_env: Some(variable),
+            ..
+        }
+        | Self::Mongodb {
             ca_env: Some(variable),
             ..
         }
@@ -413,7 +432,8 @@ impl SourceConnection {
             if resolved.tls != TlsMode::Require {
                 return Err(Error::SourceConfiguration("custom CA requires TLS"));
             }
-            let pem = environment(variable)?;
+            let pem = std::env::var(variable).ok().filter(|v| !v.trim().is_empty())
+                .ok_or(Error::SourceConfiguration("TLS CA environment variable is missing, empty, or not Unicode; set the PEM contents referenced by --tls-ca-env"))?;
             if pem.len() > 65536 {
                 return Err(Error::SourceConfiguration("CA bundle exceeds 64 KiB"));
             }
