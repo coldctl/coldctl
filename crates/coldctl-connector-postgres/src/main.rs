@@ -1,7 +1,9 @@
+mod parent_selection;
 mod postgres;
 mod postgres_archive;
 mod postgres_delete;
 mod postgres_restore;
+mod relationships;
 use coldctl_connector_protocol::{capability::*, model::ConnectorPin};
 use coldctl_connector_runtime::{self as runtime, Call, Reply, transport};
 pub use coldctl_core::source::config;
@@ -23,6 +25,9 @@ fn classify(error: &Error) -> runtime::Error {
         return *error;
     }
     if let Error::Archive(message) = error {
+        if message.contains("incoming foreign keys") {
+            return runtime::Error::IncomingForeignKey;
+        }
         if message.contains("unsupported column") {
             return runtime::Error::UnsupportedColumn;
         }
@@ -63,6 +68,29 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::ParentSelectionBegin(plan) => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_begin(&plan)
+                    .await?;
+                value(())
+            }
+            Request::ParentSelectionRows { index, rows } => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_rows(index, rows)
+                    .await?;
+                value(())
+            }
+            Request::ParentSelectionFinish => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_finish()?;
+                value(())
+            }
             Request::DeleteOpen(spec) => {
                 if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
                     return Err(Error::Archive("session already opened"));
@@ -288,7 +316,12 @@ async fn serve() -> runtime::Result<()> {
         features: features
             .iter()
             .cloned()
-            .chain(["verified-delete-v1".into(), "postgres-ca-v1".into()])
+            .chain([
+                "verified-delete-v1".into(),
+                "postgres-ca-v1".into(),
+                "postgres-parent-selection-v1".into(),
+                "postgres-empty-children-delete-v1".into(),
+            ])
             .collect(),
         required_host_features: features
             .into_iter()

@@ -138,6 +138,11 @@ impl Error {
                         false,
                         "row-level security is unsupported for archival",
                     ),
+                    C::IncomingForeignKey => (
+                        Configuration,
+                        false,
+                        "parent deletion blocked by incoming foreign keys; unarchived children must not be cascaded or modified",
+                    ),
                     C::OversizedRow => {
                         (OversizedRow, false, "row exceeds the 64 KiB archive limit")
                     }

@@ -90,7 +90,14 @@ impl DeleteSession {
             quote(&plan.policy.config.schema),
             quote(&plan.policy.config.table)
         );
-        let tx = self.session.client.transaction().await.map_err(pg)?;
+        let tx = self
+            .session
+            .client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+            .start()
+            .await
+            .map_err(pg)?;
         // Protect the schema/trigger/FK checks while permitting ordinary writers.
         // This still conflicts with VACUUM, concurrent index work and other
         // schema guards, so keep it bounded to one batch and retain lock_timeout.
@@ -115,11 +122,22 @@ impl DeleteSession {
                 "source database identity changed; refusing deletion",
             ));
         }
-        let unsafe_table: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=$1 AND NOT tgisinternal) OR EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE confrelid=$1 AND contype='f') OR EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=$1)", &[&oid]).await.map_err(pg)?.get(0);
+        let unsafe_table: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=$1 AND NOT tgisinternal) OR EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=$1)", &[&oid]).await.map_err(pg)?.get(0);
         if unsafe_table {
             return Err(Error::Archive(
                 "deletion refuses tables with user triggers, rules, or incoming foreign keys",
             ));
+        }
+        let keys: Vec<i64> = expected_by_key.keys().copied().collect();
+        if self.spec.require_empty_children {
+            crate::relationships::guard_empty(&tx, plan, &keys).await?;
+        } else {
+            let incoming:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE confrelid=$1 AND contype='f')", &[&oid]).await.map_err(pg)?.get(0);
+            if incoming {
+                return Err(Error::Archive(
+                    "deletion refuses incoming foreign keys outside a coordinated group",
+                ));
+            }
         }
         let values = plan
             .columns
@@ -133,7 +151,6 @@ impl DeleteSession {
         // before COMMIT; any mismatch rolls back the entire batch. Do not use a
         // separate unlocked SELECT (TOCTOU), or SKIP LOCKED (not evidence of absence).
         // Triggers, rules, incoming FKs and RLS were rejected under the schema guard.
-        let keys: Vec<i64> = expected_by_key.keys().copied().collect();
         let deleted = tx
             .query(
                 &format!("DELETE FROM {relation} WHERE {key}=ANY($1::bigint[]) RETURNING {key}::bigint, CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END", key = quote(&key)),

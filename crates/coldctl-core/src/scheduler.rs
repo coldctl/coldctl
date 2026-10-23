@@ -33,10 +33,16 @@ impl Worker {
             return Ok(None);
         }
         crate::state::recurring::admit(paths, store::now())?;
+        crate::state::recurring_groups::admit(paths, store::now())?;
         let Some(entry) = store::claim(paths, store::now())? else {
             return Ok(None);
         };
-        let mut result = self.execute(paths, &entry, shutdown.clone()).await;
+        let grouped = crate::state::recurring_groups::owner(paths, &entry.id)?.is_some();
+        let mut result = if grouped {
+            crate::state::recurring_groups::execute(paths, &entry, shutdown.clone()).await
+        } else {
+            self.execute(paths, &entry, shutdown.clone()).await
+        };
         if matches!(result, Ok(JobStatus::Completed)) && entry.options.delete_after_archive {
             let saved = store::show(paths, &entry.id)?;
             result = if saved.status == "cancelled" {
@@ -89,6 +95,9 @@ impl Worker {
             failures,
             message.as_deref(),
         )?;
+        if grouped {
+            crate::state::recurring_groups::admit(paths, store::now())?;
+        }
         Ok(Some(store::show(paths, &entry.id)?))
     }
 
@@ -249,6 +258,7 @@ mod tests {
 
     fn plan(paths: &StatePaths) -> ArchivePlan {
         ArchivePlan {
+            parent_selection: vec![],
             connector_pin: None,
             policy: archive::policy_show(paths, "orders").unwrap(),
             destination_config: None,

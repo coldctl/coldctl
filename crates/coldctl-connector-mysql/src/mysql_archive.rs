@@ -17,6 +17,7 @@ pub struct MysqlArchive {
     pub database: String,
     identity: String,
     plan: Option<ArchivePlan>,
+    pub(crate) selection: Option<crate::parent_selection::Selection>,
 }
 impl MysqlArchive {
     pub async fn connect(c: ResolvedConnection) -> Result<Self, Error> {
@@ -34,6 +35,7 @@ impl MysqlArchive {
             database: c.database,
             identity: server,
             plan: None,
+            selection: None,
         })
     }
     pub fn identity(&self) -> &str {
@@ -99,7 +101,37 @@ impl MysqlArchive {
             .map_err(err)?
             .ok_or_else(bad)?;
         let estimated_rows:Option<i64>=self.conn.exec_first("SELECT TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA=? AND TABLE_NAME=?",(&c.schema,&c.table)).await.map_err(err)?.flatten();
-        let plan=ArchivePlan{destination_config:None,connector_pin:None,policy,destination_path,cutoff_utc,primary_key:key,table_oid:oid as u32,columns,estimated_rows,delete:false,warnings:vec!["MySQL 8.4 InnoDB: freeze eligible rows and membership through export/resume; no reusable snapshot is claimed. Data-only restore preserves primary key and column types, not secondary indexes, defaults or application constraints.".into()],safety:None};
+        let relationships = mysql::relationships(&mut self.conn, &c.schema).await?;
+        let incoming = relationships
+            .foreign_keys
+            .iter()
+            .filter(|fk| fk.parent_schema == c.schema && fk.parent_table == c.table)
+            .count();
+        let outgoing = relationships
+            .foreign_keys
+            .iter()
+            .filter(|fk| fk.child_schema == c.schema && fk.child_table == c.table)
+            .count();
+        let mut warnings=vec!["MySQL 8.4 InnoDB: freeze eligible rows and membership through export/resume; no reusable snapshot is claimed. Data-only restore preserves primary key and column types, not secondary indexes, defaults or application constraints.".into()];
+        warnings.push(format!("Visible foreign keys: {incoming} incoming, {outgoing} outgoing. Discovery may omit hidden relationships; deletion independently rechecks all incoming InnoDB foreign keys under a metadata lock. See source discover for ordered column mappings and referential actions."));
+        if incoming > 0 {
+            warnings.push("Parent deletion is blocked by incoming foreign keys in single-job deletion, including CASCADE and SET NULL. Use explicit archive group-run/group-delete policies for child-first deletion; remaining children always block parent deletion.".into());
+        }
+        let plan = ArchivePlan {
+            parent_selection: vec![],
+            destination_config: None,
+            connector_pin: None,
+            policy,
+            destination_path,
+            cutoff_utc,
+            primary_key: key,
+            table_oid: oid as u32,
+            columns,
+            estimated_rows,
+            delete: false,
+            warnings,
+            safety: None,
+        };
         self.plan = Some(plan.clone());
         Ok(plan)
     }
@@ -150,7 +182,7 @@ impl MysqlArchive {
         Ok(())
     }
     pub async fn upper_key(&mut self, plan: &ArchivePlan) -> Result<Option<i64>, Error> {
-        let (predicate, params) = predicate(plan);
+        let (predicate, params) = self.selection_predicate(plan)?;
         let key = key_type(plan)?;
         let row: Option<Row> = self
             .conn
@@ -186,7 +218,7 @@ impl MysqlArchive {
         upper: i64,
     ) -> Result<Option<DataBatch>, Error> {
         let key = key_type(plan)?;
-        let (mut where_sql, mut params) = predicate(plan);
+        let (mut where_sql, mut params) = self.selection_predicate(plan)?;
         where_sql.push_str(&format!(" AND {}<=?", q(&plan.primary_key)));
         params.push(key_parameter(key, upper)?);
         if let Some(last) = last {
@@ -276,7 +308,7 @@ pub fn key_type(plan: &ArchivePlan) -> Result<&str, Error> {
         .map(|c| c.postgres_type.as_str())
         .ok_or_else(bad)
 }
-fn predicate(plan: &ArchivePlan) -> (String, Vec<Value>) {
+pub(crate) fn predicate(plan: &ArchivePlan) -> (String, Vec<Value>) {
     let mut sql = format!("{} < ?", q(&plan.policy.config.time_column));
     let mut values = vec![Value::from(plan.cutoff_utc.clone())];
     if let (Some(col), Some(value)) = (

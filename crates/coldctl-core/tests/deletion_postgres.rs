@@ -239,6 +239,7 @@ async fn verified_deletion_is_atomic_resumable_and_scheduler_opt_in() {
     native
         .call::<_, ()>(
             Request::DeleteOpen(DeleteSpec {
+                require_empty_children: false,
                 plan: job.plan.clone(),
                 source_identity: identity,
             }),

@@ -131,6 +131,17 @@ impl DeleteSession {
         let database = &plan.policy.config.schema;
         let name = &plan.policy.config.table;
         let target = table(database, name);
+        let checks: Option<u8> = self
+            .archive
+            .conn
+            .query_first("SELECT @@SESSION.foreign_key_checks")
+            .await
+            .map_err(err)?;
+        if checks != Some(1) {
+            return Err(Error::Archive(
+                "MySQL deletion requires foreign_key_checks=1; refusing unsafe deletion",
+            ));
+        }
         self.archive
             .conn
             .query_drop("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -169,10 +180,15 @@ impl DeleteSession {
                 (format!("{database}/{name}"),),
             )
             .await
-            .map_err(err)?;
-        if trigger.is_some() || incoming.is_some() {
+            .map_err(|_| Error::Archive("MySQL deletion cannot inspect incoming foreign keys; PROCESS privilege and readable InnoDB metadata are required"))?;
+        if incoming.is_some() && !self.spec.require_empty_children {
             return Err(Error::Archive(
-                "MySQL deletion refuses triggers or incoming foreign keys",
+                "MySQL deletion refuses triggers or incoming foreign keys: parent deletion blocked for every incoming FK, including CASCADE and SET NULL; child archival cannot be assumed",
+            ));
+        }
+        if trigger.is_some() {
+            return Err(Error::Archive(
+                "MySQL deletion refuses triggers or incoming foreign keys: source-table triggers can affect unarchived data",
             ));
         }
         let columns = plan
@@ -219,6 +235,67 @@ impl DeleteSession {
                 .await
                 .map_err(err)?
         };
+        if self.spec.require_empty_children && incoming.is_some() {
+            // Parent X locks above prevent concurrent FK-checked inserts into
+            // these parents. Child metadata locks prevent schema changes while
+            // checking every authoritative incoming relationship. Never cascade.
+            let relationships = mysql::relationships(&mut self.archive.conn, database).await?;
+            let incoming_fks: Vec<_> = relationships
+                .foreign_keys
+                .into_iter()
+                .filter(|fk| fk.parent_schema == *database && fk.parent_table == *name)
+                .collect();
+            let authoritative: Vec<String> = self
+                .archive
+                .conn
+                .exec(
+                    "SELECT ID FROM information_schema.innodb_foreign WHERE REF_NAME=?",
+                    (format!("{database}/{name}"),),
+                )
+                .await
+                .map_err(err)?;
+            let visible: std::collections::HashSet<_> = incoming_fks
+                .iter()
+                .map(|fk| format!("{}/{}", fk.child_schema, fk.name))
+                .collect();
+            if authoritative.len() != visible.len()
+                || authoritative.iter().any(|id| !visible.contains(id))
+            {
+                return Err(Error::Archive(
+                    "coordinated deletion cannot inspect every incoming relationship",
+                ));
+            }
+            for fk in incoming_fks {
+                let child = table(&fk.child_schema, &fk.child_table);
+                self.archive
+                    .conn
+                    .query_drop(format!("SELECT 1 FROM {child} WHERE 0 FOR UPDATE"))
+                    .await
+                    .map_err(err)?;
+                let join = fk
+                    .child_columns
+                    .iter()
+                    .zip(&fk.parent_columns)
+                    .map(|(c, p)| format!("c.{}=p.{}", q(c), q(p)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                if join.is_empty() || fk.child_columns.len() != fk.parent_columns.len() {
+                    return Err(bad());
+                }
+                // Use the original bounded archived key set, never a broad retention predicate.
+                let blocked: Option<u8> = self.archive.conn.exec_first(
+                    format!("SELECT 1 FROM {child} c JOIN {target} p ON {join} WHERE p.{} IN ({placeholders}) LIMIT 1 FOR UPDATE", q(&plan.primary_key)),
+                    mysql_async::Params::Positional(rows.iter().map(|row| {
+                        let key = mysql_types::cursor(kind, row[key_index].as_deref().ok_or_else(bad)?)?;
+                        key_parameter(kind, key)
+                    }).collect::<Result<Vec<_>, Error>>()?)).await.map_err(err)?;
+                if blocked.is_some() {
+                    return Err(Error::Archive(
+                        "MySQL parent deletion blocked for every incoming FK with remaining children; archive, verify and explicitly delete children first",
+                    ));
+                }
+            }
+        }
         let expected = rows
             .iter()
             .map(|row| {

@@ -88,6 +88,9 @@ pub fn create(
     }
     let p = archive::policy_show(paths, policy)?;
     let _guard = crate::archive::checkpoint::policy_lock(paths, &p.id)?;
+    if super::recurring_groups::reserved(paths, &p.id)? {
+        return Err(Error::Archive("policy belongs to a recurring group"));
+    }
     let s = super::sources::show(paths, &p.source)?;
     let d = super::destinations::show(paths, &p.destination)?;
     if !matches!(s.source_type.as_str(), "postgres" | "mysql" | "mongodb")
@@ -439,6 +442,7 @@ mod tests {
     }
     fn complete(paths: &StatePaths, q: &scheduler::Entry, deleted: bool) -> String {
         let mut plan = ArchivePlan {
+            parent_selection: vec![],
             connector_pin: None,
             policy: archive::policy_show(paths, "orders").unwrap(),
             destination_path: paths.data_dir.join("staging"),

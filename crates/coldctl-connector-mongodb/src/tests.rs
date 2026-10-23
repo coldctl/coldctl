@@ -84,6 +84,7 @@ async fn mongodb_verified_deletion_rollback_replay_and_resume() {
     let mut direct = crate::deletion::DeleteSession::open(
         resolved.clone(),
         DeleteSpec {
+            require_empty_children: false,
             plan: job.plan.clone(),
             source_identity: native.identity().into(),
         },
@@ -157,6 +158,7 @@ async fn mongodb_verified_deletion_rollback_replay_and_resume() {
     let mut stale = crate::deletion::DeleteSession::open(
         resolved,
         DeleteSpec {
+            require_empty_children: false,
             plan: job.plan.clone(),
             source_identity: native.identity().into(),
         },

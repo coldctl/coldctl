@@ -34,6 +34,7 @@ pub enum Error {
     OversizedRow,
     UnsupportedColumn,
     RowSecurity,
+    IncomingForeignKey,
     Busy,
 }
 impl std::fmt::Display for Error {
@@ -54,6 +55,7 @@ impl std::fmt::Display for Error {
             Self::OversizedRow=>"row exceeds the connector archive byte limit; check the documented engine limits",
             Self::UnsupportedColumn=>"unsupported column type in archive source",
             Self::RowSecurity=>"row-level security is unsupported for archival",
+            Self::IncomingForeignKey=>"parent deletion blocked by incoming foreign keys; unarchived children must not be cascaded or modified",
             Self::Busy=>"connector target is busy",
         })
     }

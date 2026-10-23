@@ -417,6 +417,7 @@ async fn compare(
     }
     reader.configure_timeouts(&job.execution).await?;
     reader.validate_resume(&job.plan).await?;
+    reader.prepare_parents(paths, &job.plan).await?;
     let mut last = None;
     for sequence in 1..=job.objects_created {
         if stopped(paths, options, queue)?

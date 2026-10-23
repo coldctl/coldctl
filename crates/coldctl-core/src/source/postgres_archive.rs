@@ -21,6 +21,87 @@ pub struct PostgresArchive {
     deadline: u32,
 }
 impl PostgresArchive {
+    pub(crate) async fn prepare_parents(
+        &self,
+        paths: &crate::paths::StatePaths,
+        plan: &ArchivePlan,
+    ) -> Result<(), Error> {
+        if plan.parent_selection.is_empty() {
+            return Ok(());
+        }
+        let mut client = self.client.lock().await;
+        if !client.hello.features.contains("mysql-parent-selection-v1")
+            && !client
+                .hello
+                .features
+                .contains("postgres-parent-selection-v1")
+        {
+            return Err(Error::Archive(
+                "connector does not support automatic parent-key selection",
+            ));
+        }
+        client
+            .call::<_, ()>(
+                Request::ParentSelectionBegin(plan.clone()),
+                self.deadline,
+                false,
+            )
+            .await?;
+        for (index, selection) in plan.parent_selection.iter().enumerate() {
+            let _lock = crate::archive::checkpoint::lock(paths, &selection.job_id)?;
+            let parent = crate::state::archive::job_show(paths, &selection.job_id)?;
+            let journal = crate::archive::checkpoint::load(paths, &selection.job_id)?;
+            if parent.imported
+                || parent.plan.policy.source != plan.policy.source
+                || journal.source_identity != self.identity
+                || parent.rows_processed != selection.rows
+                || parent.plan.policy.config.schema != selection.relationship.parent_schema
+                || parent.plan.policy.config.table != selection.relationship.parent_table
+                || journal
+                    .manifest
+                    .as_ref()
+                    .is_none_or(|m| m.sha256 != selection.manifest_sha256)
+            {
+                return Err(Error::Archive(
+                    "parent selection archive identity or manifest changed",
+                ));
+            }
+            crate::archive::verifier::verify_observed(paths, &parent.id, None)?;
+            let columns = selection
+                .relationship
+                .parent_columns
+                .iter()
+                .map(|name| {
+                    parent
+                        .plan
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == name)
+                        .ok_or(Error::Archive("parent archive lacks referenced columns"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for sequence in 1..=parent.objects_created {
+                let rows = super::postgres_restore::read_batch(paths, &parent, sequence)?;
+                for chunk in rows.chunks(400) {
+                    let rows = chunk
+                        .iter()
+                        .map(|r| columns.iter().map(|i| r[*i].clone()).collect())
+                        .collect();
+                    client
+                        .call::<_, ()>(
+                            Request::ParentSelectionRows { index, rows },
+                            self.deadline,
+                            false,
+                        )
+                        .await?;
+                }
+            }
+        }
+        client
+            .call::<_, ()>(Request::ParentSelectionFinish, self.deadline, false)
+            .await?;
+        Ok(())
+    }
     pub async fn connect(connection: SourceConnection) -> Result<Self, Error> {
         Self::connect_pinned(connection, None).await
     }

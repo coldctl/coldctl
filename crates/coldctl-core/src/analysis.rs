@@ -162,6 +162,7 @@ mod tests {
         let mut parent = table("parent");
         parent.partitioned = true;
         let discovery = Discovery {
+            relationships: None,
             schemas: vec!["public".into()],
             tables: vec![parent, empty, table("big")],
         };
@@ -238,6 +239,7 @@ mod tests {
         ];
         let result = assess(
             Discovery {
+                relationships: None,
                 schemas: vec![],
                 tables: vec![t],
             },
@@ -258,6 +260,7 @@ mod tests {
     fn empty_database_has_an_explicit_metadata_only_report() {
         let result = assess(
             Discovery {
+                relationships: None,
                 schemas: vec!["public".into()],
                 tables: vec![],
             },

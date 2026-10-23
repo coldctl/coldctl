@@ -11,6 +11,27 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error)?;
     match versions.as_slice() {
+        [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+        ] => Ok(19),
         [] => Ok(0),
         [1] => Ok(1),
         [1, 2] => Ok(2),
@@ -226,6 +247,15 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
         }
         conn.execute(
             "INSERT INTO schema_migrations VALUES(18,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 18 {
+        conn.execute_batch(include_str!("../../migrations/0019_recurring_groups.sql"))
+            .map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(19,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

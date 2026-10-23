@@ -8,6 +8,18 @@ use coldctl_core::{
 };
 use mysql_async::{Row, prelude::Queryable};
 
+#[test]
+fn incoming_fk_refusal_survives_connector_error_transport() {
+    let error = classify(&Error::Archive(
+        "MySQL deletion refuses triggers or incoming foreign keys: parent deletion blocked for every incoming FK, including CASCADE and SET NULL; child archival cannot be assumed",
+    ));
+    assert_eq!(error, runtime::Error::IncomingForeignKey);
+    let encoded = serde_json::to_string(&error).unwrap();
+    let decoded: runtime::Error = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, error);
+    assert!(decoded.to_string().contains("incoming foreign keys"));
+}
+
 #[tokio::test]
 #[ignore = "requires disposable MySQL 8.4, TLS environment and built connector"]
 async fn mysql_verified_deletion_rollback_replay_and_resume() {
@@ -139,6 +151,7 @@ async fn mysql_verified_deletion_rollback_replay_and_resume() {
     restricted.user = name.clone();
     restricted.password = Some("coldctl_delete_role".into());
     let spec = DeleteSpec {
+        require_empty_children: false,
         plan: job.plan.clone(),
         source_identity: identity.clone(),
     };
@@ -174,6 +187,7 @@ async fn mysql_verified_deletion_rollback_replay_and_resume() {
     let mut direct = crate::mysql_delete::DeleteSession::open(
         restricted,
         DeleteSpec {
+            require_empty_children: false,
             plan: job.plan.clone(),
             source_identity: identity,
         },
@@ -391,6 +405,7 @@ async fn mysql_deletion_allows_unrelated_writes_and_guards_schema() {
         let mut deletion = crate::mysql_delete::DeleteSession::open(
             resolved.clone(),
             DeleteSpec {
+                require_empty_children: false,
                 plan: job.plan.clone(),
                 source_identity: identity.clone(),
             },
@@ -465,6 +480,7 @@ async fn mysql_deletion_allows_unrelated_writes_and_guards_schema() {
         }
     }
     let spec = DeleteSpec {
+        require_empty_children: false,
         plan: job.plan.clone(),
         source_identity: identity,
     };

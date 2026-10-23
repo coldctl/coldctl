@@ -104,8 +104,9 @@ pub fn enqueue(
         return Err(Error::Archive("schedule delay must be at most one year"));
     }
     let policy = super::archive::policy_show(paths, policy)?;
+    let _guard = crate::archive::checkpoint::policy_lock(paths, &policy.id)?;
     let reserved: bool = open(paths, false)?.query_row("SELECT EXISTS(SELECT 1 FROM recurring_archives WHERE policy_id=?1 AND status!='stopped')", [&policy.id], |r| r.get(0)).map_err(sql_error)?;
-    if reserved {
+    if reserved || super::recurring_groups::reserved(paths, &policy.id)? {
         return Err(Error::Archive(
             "policy belongs to a recurring schedule; use recurring retry or stop",
         ));
@@ -173,7 +174,7 @@ pub fn retry(paths: &StatePaths, id: &str, confirm_original_source: bool) -> Res
             |r| r.get(0),
         )
         .map_err(sql_error)?;
-    if recurring {
+    if recurring || super::recurring_groups::owner(paths, id)?.is_some() {
         return Err(Error::Archive(
             "use scheduler recurring retry for a recurring cycle",
         ));
@@ -205,7 +206,12 @@ pub(crate) fn claim(paths: &StatePaths, now: i64) -> Result<Option<Entry>, Error
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(sql_error)?;
-    let entry = tx.query_row(&format!("{SELECT} WHERE status='pending' AND due_at<=?1 AND (recurring_id IS NULL OR EXISTS(SELECT 1 FROM recurring_archives r WHERE r.id=recurring_id AND r.status='active')) ORDER BY due_at,created_at,id LIMIT 1"), [now], row).optional().map_err(sql_error)?;
+    let group_filter = if super::migrations::version(&tx)? >= 19 {
+        "AND (NOT EXISTS(SELECT 1 FROM recurring_group_members gm WHERE gm.queue_id=archive_queue.id) OR EXISTS(SELECT 1 FROM recurring_group_members gm JOIN recurring_groups g ON g.id=gm.group_id WHERE gm.queue_id=archive_queue.id AND g.status='active' AND g.current_queue=archive_queue.id))"
+    } else {
+        ""
+    };
+    let entry = tx.query_row(&format!("{SELECT} WHERE status='pending' AND due_at<=?1 AND (recurring_id IS NULL OR EXISTS(SELECT 1 FROM recurring_archives r WHERE r.id=recurring_id AND r.status='active')) {group_filter} ORDER BY due_at,created_at,id LIMIT 1"), [now], row).optional().map_err(sql_error)?;
     if let Some(entry) = &entry {
         tx.execute(
             "UPDATE archive_queue SET status='running' WHERE id=?1",

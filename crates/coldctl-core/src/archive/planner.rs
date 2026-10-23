@@ -32,7 +32,17 @@ pub struct SafetyContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParentSelection {
+    pub job_id: String,
+    pub manifest_sha256: String,
+    pub rows: i64,
+    pub relationship: crate::source::ForeignKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivePlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_selection: Vec<ParentSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector_pin: Option<coldctl_connector_protocol::model::ConnectorPin>,
     pub policy: Policy,

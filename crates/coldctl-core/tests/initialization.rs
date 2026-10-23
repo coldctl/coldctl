@@ -161,6 +161,7 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
         include_str!("../migrations/0016_recurring.sql"),
         include_str!("../migrations/0017_monitoring.sql"),
         include_str!("../migrations/0018_gcs_sink.sql"),
+        include_str!("../migrations/0019_recurring_groups.sql"),
     ];
     for version in 1..=migrations.len() {
         let (_temp, paths) = setup();
@@ -272,7 +273,7 @@ fn every_supported_schema_prefix_upgrades_without_changing_identity() {
             conn.query_row("SELECT max(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            18
+            19
         );
         assert_eq!(
             conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

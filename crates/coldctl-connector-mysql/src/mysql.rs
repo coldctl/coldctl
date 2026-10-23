@@ -201,7 +201,65 @@ pub async fn discover(conn: &mut Conn, database: &str) -> Result<Discovery, Erro
     Ok(Discovery {
         schemas: vec![database.into()],
         tables,
+        relationships: Some(relationships(conn, database).await?),
     })
+}
+
+pub async fn relationships(
+    conn: &mut Conn,
+    database: &str,
+) -> Result<coldctl_core::source::Relationships, Error> {
+    use coldctl_core::source::{ForeignKey, Relationships};
+    // Include incoming cross-schema references when visible, and retain the
+    // declared column order for composite keys. This is advisory metadata only.
+    let rows: Vec<Row> = conn.exec(
+        "SELECT k.CONSTRAINT_NAME,k.TABLE_SCHEMA,k.TABLE_NAME,k.COLUMN_NAME,k.REFERENCED_TABLE_SCHEMA,k.REFERENCED_TABLE_NAME,k.REFERENCED_COLUMN_NAME,r.DELETE_RULE,r.UPDATE_RULE FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME AND r.TABLE_NAME=k.TABLE_NAME WHERE k.REFERENCED_TABLE_NAME IS NOT NULL AND (k.TABLE_SCHEMA=? OR k.REFERENCED_TABLE_SCHEMA=?) ORDER BY k.TABLE_SCHEMA,k.TABLE_NAME,k.CONSTRAINT_NAME,k.ORDINAL_POSITION LIMIT 10001",
+        (database,database)).await.map_err(err)?;
+    if rows.len() > 10000 {
+        return Err(Error::Archive(
+            "relationship discovery exceeds 10000 column-pair limit",
+        ));
+    }
+    let mut keys: BTreeMap<(String, String, String), ForeignKey> = BTreeMap::new();
+    for row in rows {
+        let (
+            name,
+            child_schema,
+            child_table,
+            child_column,
+            parent_schema,
+            parent_table,
+            parent_column,
+            on_delete,
+            on_update,
+        ): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = mysql_async::from_row_opt(row).map_err(|_| bad())?;
+        let entry = keys
+            .entry((child_schema.clone(), child_table.clone(), name.clone()))
+            .or_insert_with(|| ForeignKey {
+                name,
+                child_schema,
+                child_table,
+                child_columns: vec![],
+                parent_schema,
+                parent_table,
+                parent_columns: vec![],
+                on_delete,
+                on_update,
+            });
+        entry.child_columns.push(child_column);
+        entry.parent_columns.push(parent_column);
+    }
+    Ok(Relationships { visibility: "visible_metadata_only; hidden relationships may exist; deletion independently checks InnoDB metadata".into(),foreign_keys:keys.into_values().collect() })
 }
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()

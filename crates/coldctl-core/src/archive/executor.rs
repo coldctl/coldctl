@@ -63,6 +63,17 @@ pub(crate) async fn run_queued(
     report: impl FnOnce(&ArchivePlan),
     queue_id: Option<&str>,
 ) -> Result<store::Job, Error> {
+    run_selected(paths, name, options, report, queue_id, Vec::new()).await
+}
+
+pub(crate) async fn run_selected(
+    paths: &StatePaths,
+    name: &str,
+    options: RunOptions,
+    report: impl FnOnce(&ArchivePlan),
+    queue_id: Option<&str>,
+    parent_selection: Vec<super::planner::ParentSelection>,
+) -> Result<store::Job, Error> {
     let started = Instant::now();
     let mut controls = options.execution.clone();
     controls.minimum_free_bytes = options.minimum_free_bytes;
@@ -76,6 +87,10 @@ pub(crate) async fn run_queued(
     let mut reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
     reader.configure_timeouts(&controls).await?;
     let mut plan = reader.plan(policy, destination.path.clone()).await?;
+    plan.parent_selection = parent_selection;
+    if !plan.parent_selection.is_empty() {
+        plan.warnings.push("Automatic child selection: archived parent FK values replace this table's age and equality filters; all matching child rows are eligible.".into());
+    }
     plan.destination_config = destination.config.clone();
     crate::destination::open(destination.config.as_ref(), &destination.path)?.test_access()?;
     let source_identity = reader.source_identity(plan.table_oid).await?;
@@ -89,7 +104,9 @@ pub(crate) async fn run_queued(
         minimum_free_bytes,
     });
     crate::state::recurring::guard_plan(paths, queue_id, &mut plan, reader.identity())?;
+    crate::state::recurring_groups::guard_plan(paths, queue_id, &mut plan, reader.identity())?;
     report(&plan);
+    reader.prepare_parents(paths, &plan).await?;
     let upper = reader.upper_key(&plan).await?;
     let job = store::job_create_queued(
         paths,
@@ -225,6 +242,7 @@ pub(crate) async fn resume_scheduled(
         reader.configure_timeouts(&controls).await?;
         progress.stage(Stage::Validating)?;
         reader.validate_resume(&job.plan).await?;
+        reader.prepare_parents(paths, &job.plan).await?;
         crate::destination::for_job(&job)?.test_access()?;
         execute_observed(
             paths,
@@ -650,6 +668,7 @@ mod tests {
         )
         .unwrap();
         let plan = ArchivePlan {
+            parent_selection: vec![],
             connector_pin: None,
             safety: None,
             policy: Policy {
@@ -1033,7 +1052,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; DROP TABLE recurring_group_members; DROP TABLE recurring_group_reservations; DROP TABLE recurring_groups; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=8;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -1132,7 +1151,7 @@ mod tests {
         let (_temp, paths, job) = fixture();
         execute(&paths, &job.id, &mut reader()).await.unwrap();
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; DROP TABLE recurring_group_members; DROP TABLE recurring_group_reservations; DROP TABLE recurring_groups; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
         assert!(store::job_show(&paths, &job.id).is_err());
         state::initialize(&paths, "test").unwrap();
         let upgraded = store::job_show(&paths, &job.id).unwrap();
@@ -1313,7 +1332,7 @@ mod tests {
         .unwrap();
         assert!(start.elapsed() >= Duration::from_millis(120));
         let conn = rusqlite::Connection::open(paths.database()).unwrap();
-        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; ALTER TABLE jobs DROP COLUMN imported_root; ALTER TABLE jobs DROP COLUMN progress_json; ALTER TABLE jobs DROP COLUMN failure_json; ALTER TABLE jobs DROP COLUMN execution_json; DROP TABLE recurring_group_members; DROP TABLE recurring_group_reservations; DROP TABLE recurring_groups; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=6;").unwrap();
         state::initialize(&paths, "upgrade").unwrap();
         verifier::verify(&paths, &job.id).unwrap();
         assert_eq!(store::job_show(&paths, &job.id).unwrap().rows_processed, 3);
@@ -1362,7 +1381,7 @@ mod tests {
         let old = include_str!("../../migrations/0004_archive.sql");
         let start = old.find("CREATE TABLE jobs").unwrap();
         conn.execute_batch(&old[start..]).unwrap();
-        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
+        conn.execute_batch("DROP TRIGGER IF EXISTS monitor_jobs_insert; DROP TRIGGER IF EXISTS monitor_jobs_update; DROP TRIGGER IF EXISTS monitor_archive_queue_insert; DROP TRIGGER IF EXISTS monitor_archive_queue_update; DROP TRIGGER IF EXISTS monitor_recurring_archives_insert; DROP TRIGGER IF EXISTS monitor_recurring_archives_update; DROP TABLE IF EXISTS operational_events; INSERT INTO jobs SELECT id,policy_name,plan_json,status,started_at,completed_at,rows_processed,bytes_written,objects_created,last_key,error FROM saved_jobs; DROP TABLE saved_jobs; DROP TABLE recurring_group_members; DROP TABLE recurring_group_reservations; DROP TABLE recurring_groups; DROP TABLE recurring_archives; DROP TABLE archive_queue; DROP TABLE archive_deletions; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
         state::initialize(&paths, "upgraded").unwrap();
         assert_eq!(state::status(&paths).unwrap(), installation);
         let preserved = store::job_show(&paths, &job.id).unwrap();

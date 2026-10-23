@@ -18,6 +18,26 @@ pub struct Args {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Archive and verify explicit PostgreSQL/MySQL table policies as a group. Never deletes.
+    GroupRun {
+        #[arg(long, required=true, num_args=2..=32)]
+        policies: Vec<String>,
+        /// Select descendants from archived parent FK values instead of child retention filters.
+        #[arg(long)]
+        select_children: bool,
+        /// Confirm all selected tables and their eligibility remain quiescent.
+        #[arg(long, required = true)]
+        confirm_quiescent_source: bool,
+    },
+    /// Reverify every member, then delete children before parents; refuse remaining references.
+    GroupDelete {
+        #[arg(long, required=true, num_args=2..=32)]
+        jobs: Vec<String>,
+        #[arg(long, required = true)]
+        confirm_delete: bool,
+        #[arg(long, required = true)]
+        confirm_original_source: bool,
+    },
     /// Compare a completed archive with retained source rows and optional gateway ID lookups. Never deletes.
     Shadow {
         /// Completed archive job ID.
@@ -127,6 +147,32 @@ pub enum Command {
 }
 pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
+        Command::GroupRun {
+            policies,
+            select_children,
+            confirm_quiescent_source: _,
+        } => {
+            let signals = crate::execution::Signals::install()?;
+            let result = coldctl_core::archive::group::run(
+                paths,
+                &policies,
+                select_children,
+                signals.shutdown.clone(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::GroupDelete {
+            jobs,
+            confirm_delete: _,
+            confirm_original_source: _,
+        } => {
+            let signals = crate::execution::Signals::install()?;
+            let result =
+                coldctl_core::archive::group::delete(paths, &jobs, signals.shutdown.clone())
+                    .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Shadow {
             id,
             confirm_original_source,

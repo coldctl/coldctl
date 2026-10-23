@@ -74,6 +74,11 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::ParentSelectionBegin(_)
+            | Request::ParentSelectionRows { .. }
+            | Request::ParentSelectionFinish => {
+                Err(Error::Archive("parent selection is MySQL-only"))
+            }
             Request::DeleteOpen(spec) => {
                 if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
                     return Err(Error::Archive("session already opened"));

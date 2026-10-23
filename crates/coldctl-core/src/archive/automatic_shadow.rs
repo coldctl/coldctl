@@ -254,6 +254,48 @@ pub(crate) async fn prepare(
     }
 }
 
+/// All configured group members must pass before any member can mutate source rows.
+/// Completed/partially deleted members use their original manifest-bound receipts;
+/// re-comparing their deleted source rows would incorrectly turn recovery into a mismatch.
+pub(crate) async fn prepare_group(
+    paths: &StatePaths,
+    ids: &[String],
+    queue: &str,
+    shutdown: Shutdown,
+) -> Result<(), Error> {
+    let jobs = ids
+        .iter()
+        .map(|id| crate::state::archive::job_show(paths, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let configured = jobs
+        .iter()
+        .map(|job| {
+            Ok(policy(paths, job)?
+                .is_some_and(|p| p.automatic_shadow.contains_key(&job.plan.policy.name)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    require_group_coverage(&configured)?;
+    if !configured.iter().any(|v| *v) {
+        return Ok(());
+    }
+    for job in jobs {
+        if shutdown.requested() {
+            return Err(Error::Archive(protection::PAUSED));
+        }
+        prepare(paths, &job.id, queue, shutdown.clone()).await?;
+    }
+    Ok(())
+}
+
+fn require_group_coverage(configured: &[bool]) -> Result<(), Error> {
+    if configured.iter().any(|v| *v) && configured.iter().any(|v| !*v) {
+        return Err(Error::Archive(
+            "automatic group shadow requires Gateway configuration for every member policy; deletion blocked",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +305,14 @@ mod tests {
         source::SourceConnection,
         state::{self, archive, destinations, sources},
     };
+
+    #[test]
+    fn group_coverage_cannot_silently_skip_a_parent_or_child() {
+        assert!(require_group_coverage(&[true, true]).is_ok());
+        assert!(require_group_coverage(&[false, false]).is_ok());
+        assert!(require_group_coverage(&[true, false]).is_err());
+        assert!(require_group_coverage(&[false, true]).is_err());
+    }
 
     fn config() -> Config {
         Config {
@@ -306,6 +356,7 @@ mod tests {
         )
         .unwrap();
         let plan = ArchivePlan {
+            parent_selection: vec![],
             connector_pin: None,
             policy: archive::policy_show(&paths, "orders").unwrap(),
             destination_config: None,

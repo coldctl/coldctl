@@ -17,6 +17,34 @@ pub async fn run(
     match output {
         Output::Json => super::json(&serde_json::to_value(discovery)?)?,
         Output::Table => {
+            if let Some(relationships) = &discovery.relationships {
+                println!("Relationships: {}", text(&relationships.visibility));
+                for fk in &relationships.foreign_keys {
+                    println!(
+                        "  FK {}: {}.{} ({}) -> {}.{} ({}) ON DELETE {} ON UPDATE {} [parent deletion blocked]",
+                        text(&fk.name),
+                        text(&fk.child_schema),
+                        text(&fk.child_table),
+                        fk.child_columns
+                            .iter()
+                            .map(|s| text(s))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        text(&fk.parent_schema),
+                        text(&fk.parent_table),
+                        fk.parent_columns
+                            .iter()
+                            .map(|s| text(s))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        text(&fk.on_delete),
+                        text(&fk.on_update)
+                    );
+                }
+                println!(
+                    "Relationship discovery is advisory, not deletion authorization. Undeclared application relationships are not detected."
+                );
+            }
             println!(
                 "Source: {name}\nSchemas: {}",
                 discovery

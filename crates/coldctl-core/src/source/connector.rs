@@ -23,6 +23,12 @@ pub enum Request {
     Discover,
     Analyze,
     OpenScan,
+    ParentSelectionBegin(ArchivePlan),
+    ParentSelectionRows {
+        index: usize,
+        rows: Vec<Vec<Option<String>>>,
+    },
+    ParentSelectionFinish,
     ConfigureTimeouts(ExecutionControls),
     Plan {
         policy: Policy,
@@ -66,6 +72,9 @@ pub enum Request {
 pub struct DeleteSpec {
     pub plan: ArchivePlan,
     pub source_identity: String,
+    /// Coordinator-only opt-in: incoming references must be empty under parent locks.
+    #[serde(default)]
+    pub require_empty_children: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -11,3 +11,4 @@ pub mod sources;
 pub use database::{initialize, status};
 pub use installation::{InitOutcome, Installation};
 pub mod recurring;
+pub mod recurring_groups;

@@ -2,6 +2,7 @@ mod mysql;
 mod mysql_archive;
 mod mysql_delete;
 mod mysql_restore;
+mod parent_selection;
 use coldctl_connector_protocol::{capability::*, model::ConnectorPin};
 use coldctl_connector_runtime::{self as runtime, Call, Reply, transport};
 pub use coldctl_core::source::config;
@@ -20,6 +21,9 @@ fn value<T: Serialize>(value: T) -> Result<serde_json::Value, Error> {
 }
 fn classify(error: &Error) -> runtime::Error {
     if let Error::Archive(message) = error {
+        if message.contains("parent deletion blocked for every incoming FK") {
+            return runtime::Error::IncomingForeignKey;
+        }
         if message.contains("authentication") {
             return runtime::Error::Authentication;
         }
@@ -75,6 +79,29 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::ParentSelectionBegin(plan) => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_begin(&plan)
+                    .await?;
+                value(())
+            }
+            Request::ParentSelectionRows { index, rows } => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_rows(index, rows)
+                    .await?;
+                value(())
+            }
+            Request::ParentSelectionFinish => {
+                self.scan
+                    .as_mut()
+                    .ok_or(Error::Archive("scan not open"))?
+                    .selection_finish()?;
+                value(())
+            }
             Request::DeleteOpen(spec) => {
                 if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
                     return Err(Error::Archive("session already opened"));
@@ -308,7 +335,11 @@ async fn serve() -> runtime::Result<()> {
         features: features
             .iter()
             .cloned()
-            .chain(["verified-delete-v1".into()])
+            .chain([
+                "verified-delete-v1".into(),
+                "mysql-empty-children-delete-v1".into(),
+                "mysql-parent-selection-v1".into(),
+            ])
             .collect(),
         required_host_features: features,
         capabilities: Capabilities {

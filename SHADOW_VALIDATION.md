@@ -171,3 +171,26 @@ Shadow validation currently runs a full job per attempt, outside the export time
 budget, with bounded individual requests (refresh 120 seconds; lookups 30 seconds).
 Choose a validation age large enough for the full run; long comparisons can delay other
 queued jobs. It checks every key in bounded batches; qualify throughput before the pilot.
+
+### Recurring parent-child groups (MySQL and PostgreSQL)
+
+For `agent scheduler group`, configure `automatic_shadow` for every group policy
+and keep `require_gateway_shadow` enabled. A group with partial automatic coverage
+is rejected before deletion. Use a distinct dataset mapping for each member table;
+parent and child primary keys may overlap and must not share one mixed dataset.
+
+After all parent-first archives are complete and verified, the scheduler runs the
+configured full source/Gateway comparisons for every member before deleting any
+child. Child comparisons use the exact archived parent selection, including children
+newer than their own retention cutoff. Parent or child mismatch, failed refresh,
+failed lookup, or incomplete evidence blocks the whole group. Inspect each job's
+`archive shadow-reports` and use `agent scheduler group retry GROUP_ID
+--confirm-original-source` after resolving a terminal failure.
+
+Each deletion slice rechecks all-member evidence and archive integrity. Passing
+reports for unstarted members must still meet the configured age; members whose
+deletion journals have begun use the existing durable receipts. This allows restart
+between child and parent deletion without treating deleted children as mismatches.
+New cycles have new jobs and require their own reports. No new deletion permission
+is granted by this configuration. Source quiescence remains required for the full
+cycle, and a group is not an atomic cross-table transaction.

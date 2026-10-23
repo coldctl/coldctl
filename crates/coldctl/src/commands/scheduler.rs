@@ -13,6 +13,11 @@ pub struct SchedulerArgs {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Recurring coordinated PostgreSQL/MySQL parent-child archival and verified deletion.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
     /// Continuously archive and delete eligible records to S3 or Azure Blob at a fixed delay.
     Recurring {
         #[command(subcommand)]
@@ -107,11 +112,94 @@ pub enum RecurringCommand {
     },
 }
 
+#[derive(Subcommand)]
+pub enum GroupCommand {
+    Create {
+        #[arg(long, num_args=2..=32)]
+        policies: Vec<String>,
+        #[arg(long)]
+        every_seconds: u64,
+        #[arg(long, required = true)]
+        confirm_quiescent_source: bool,
+        #[arg(long, required = true)]
+        confirm_original_source: bool,
+        #[arg(long, required = true)]
+        delete_after_archive: bool,
+        #[arg(long, default_value_t = 5)]
+        max_retries: u32,
+        #[command(flatten)]
+        execution: crate::execution::ExecutionArgs,
+    },
+    List,
+    Show {
+        id: String,
+    },
+    Stop {
+        id: String,
+    },
+    Retry {
+        id: String,
+        #[arg(long, required = true)]
+        confirm_original_source: bool,
+    },
+}
+
 pub async fn run(
     args: SchedulerArgs,
     paths: &StatePaths,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
+        Command::Group { command } => {
+            use coldctl_core::state::recurring_groups as groups;
+            let value = match command {
+                GroupCommand::Create {
+                    policies,
+                    every_seconds,
+                    confirm_quiescent_source,
+                    confirm_original_source,
+                    delete_after_archive,
+                    max_retries,
+                    execution,
+                } => {
+                    if !confirm_quiescent_source {
+                        return Err("quiescent-source confirmation required".into());
+                    }
+                    serde_json::to_value(
+                        groups::create(
+                            paths,
+                            &policies,
+                            every_seconds,
+                            store::Options {
+                                delete_after_archive,
+                                confirm_original_source,
+                                allow_repeat: false,
+                                source_stability:
+                                    coldctl_core::archive::planner::SourceStability::QuiescentCopy,
+                                execution: execution.apply(ExecutionControls {
+                                    max_duration_seconds: Some(300),
+                                    ..Default::default()
+                                })?,
+                                max_retries,
+                            },
+                        )
+                        .await?,
+                    )?
+                }
+                GroupCommand::List => serde_json::to_value(groups::list(paths)?)?,
+                GroupCommand::Show { id } => serde_json::to_value(groups::show(paths, &id)?)?,
+                GroupCommand::Stop { id } => serde_json::to_value(groups::stop(paths, &id)?)?,
+                GroupCommand::Retry {
+                    id,
+                    confirm_original_source,
+                } => {
+                    if !confirm_original_source {
+                        return Err("original-source confirmation required".into());
+                    }
+                    serde_json::to_value(groups::retry(paths, &id)?)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Command::Recurring { command } => {
             use coldctl_core::state::recurring;
             let value = match command {

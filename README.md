@@ -155,6 +155,138 @@ and transactional restore into a separate MySQL database. Run `coldctl init` to
 upgrade existing state before adding MySQL sources. See [setup, supported types,
 privileges and verification](RELEASING.md). PostgreSQL remains compatible.
 
+MySQL `source discover <source>` reports visible foreign keys, ordered child/parent
+column mappings, and `ON DELETE` / `ON UPDATE` actions in table and JSON output.
+Archive plans warn about incoming references. Discovery is advisory: privileges
+can hide relationships, and undeclared application relationships are not detected.
+
+MySQL single-job deletion conservatively blocks every incoming foreign key, including
+`CASCADE`, `SET NULL`, self references and empty child tables. It does not assume
+children were archived by another job. Every deletion batch checks authoritative
+InnoDB metadata while holding a write-compatible metadata lock on the parent;
+unreadable metadata fails closed and requires appropriate PROCESS privileges.
+Foreign key checks must remain enabled. Archive-only remains available, but
+explicit coordinated deletion is described below. Relationship
+discovery applies to MySQL and PostgreSQL; rebuild the CLI and matching connector
+together when upgrading from a development build.
+
+#### Coordinated MySQL and PostgreSQL policies
+
+Create one retention policy per table, including every incoming child table.
+By default each policy selects its own rows. Add `--select-children` to select
+descendants through archived parent FK values instead. Confirm that all selected
+tables remain quiescent during export.
+
+```sh
+coldctl archive group-run --policies orders items item_details --confirm-quiescent-source
+coldctl archive group-run --policies orders items item_details --select-children --confirm-quiescent-source
+coldctl archive group-delete --jobs ORDERS_JOB ITEMS_JOB DETAILS_JOB --confirm-delete --confirm-original-source
+```
+
+`group-run` archives and verifies every member without deleting anything.
+`group-delete` re-verifies all archives before any deletion, orders descendants
+before parents, and uses durable per-job deletion journals. Parent batches lock
+their keys and check all incoming FK mappings against authoritative InnoDB
+metadata. Any remaining reference blocks deletion: CASCADE and SET NULL must
+never remove or alter unarchived children. Ordinary `archive delete` retains its
+blanket incoming-FK refusal.
+
+Groups support 2 to 32 distinct MySQL or PostgreSQL tables on one source. Cycles, self references,
+missing visible child tables and incomplete/imported jobs are rejected. Hidden
+metadata or unreadable child tables fail closed in the connector. Foreign key
+enforcement must remain enabled for concurrent application writers.
+
+This is resumable child-first work, not an atomic cross-table transaction: a
+failure can leave already verified child rows deleted while parents remain.
+Retry `group-delete` with the same job IDs after resolving the cause. If export
+was interrupted, use `jobs list`, resume incomplete jobs and archive any remaining
+policies individually before supplying all completed IDs. Archive immutability and
+the existing original-source, trigger, schema and protection checks still apply.
+
+With `--select-children`, roots use their normal retention/equality rules. Each
+descendant instead selects the union of rows matching any archived in-group parent
+FK tuple, regardless of the child's age or equality filter. New children of old
+parents are included; old children of unselected parents are excluded. Multiple
+FK matches do not duplicate a child row, composite FK order is preserved, and an
+empty parent archive selects no children. Tables/policies remain explicit; child
+policies currently still require a valid time column, although that filter is ignored.
+
+Parents are archived and verified first. Their exact referenced values are streamed
+in bounded batches into indexed, connection-local MySQL temporary tables; the source
+account needs `CREATE TEMPORARY TABLES` as well as its normal read privileges.
+No persistent source tables are created by selection. Temporary storage scales with
+the referenced parent values, with up to 64 incoming selection FKs per child.
+The saved child plan binds parent job IDs, manifest hashes, row counts and FK mappings.
+Resume and shadow validation rebuild the selection from those verified archives;
+keep parent jobs and archives available. Group deletion requires those exact parent
+jobs and re-verifies all archives before deleting any rows. New children arriving
+after the child archive still block parent deletion. This is not a live snapshot
+or CDC mechanism; quiescence remains required through export/resume.
+
+PostgreSQL supports the same group commands, automatic child selection, recurring
+cycles and Gateway shadow gate. It uses typed, indexed temporary tables and needs
+TEMP privilege on the database. Foreign-key columns must have identical built-in
+types, modifiers and collations, with built-in equality. Groups still require a
+single integer primary key on each member, ordinary non-partitioned tables and
+source quiescence. Cycles, inheritance, RLS and user-triggered deletion are rejected.
+
+PostgreSQL parent deletion uses READ COMMITTED, locks the selected parent rows
+FOR UPDATE, and checks every incoming FK under metadata guards before DELETE.
+It requires origin replication mode and enabled referential-integrity triggers.
+Remaining children block both CASCADE and SET NULL; ordinary single-table deletion
+continues to reject all incoming FKs. These locks permit ordinary writes to other
+rows but can delay writers to selected parent keys and conflicting DDL/maintenance.
+
+#### Recurring parent-child archival
+
+Run `coldctl init` to upgrade local state, then create a group schedule:
+
+```sh
+coldctl agent scheduler group create --policies orders items item_details --every-seconds 3600 --confirm-quiescent-source --confirm-original-source --delete-after-archive
+coldctl agent scheduler run
+coldctl agent scheduler group list
+coldctl agent scheduler group show GROUP_ID
+coldctl agent scheduler group retry GROUP_ID --confirm-original-source
+coldctl agent scheduler group stop GROUP_ID
+```
+
+Automatic child selection is always enabled for recurring groups. Each cycle
+freezes the root retention cutoff, archives parents before descendants, verifies
+all member archives, then deletes child-first in bounded batches. Every deletion
+slice re-verifies the full group. The next cycle starts only after every member's
+deletion journal completes, followed by the configured delay (60 seconds minimum).
+It rescans eligible roots, including backdated arrivals with smaller primary keys.
+Local, S3, Azure Blob and GCS destinations use the existing archive paths.
+
+The foreground worker must remain running; use a service manager for unattended
+operation. Queue entries, archive job IDs, phase and deletion progress survive
+worker restarts. Transient errors use the existing retry backoff; terminal errors
+hold the whole group. Retry continues the same cycle. Stop prevents further cycles
+and requests cancellation at a safe boundary; an in-flight batch may finish.
+Policies are reserved while a group is active or failed. Configuration changes
+hold the schedule; restore its original configuration before retrying.
+
+All member tables must remain quiescent through each complete cycle and its
+retries. This does not acquire a database-wide snapshot or coordinate application
+writers. A late unarchived child blocks its parent; previously verified children
+may already have been deleted. Keep every parent archive needed by descendants.
+Existing source-protection checks still apply. To enable automatic Gateway shadow
+validation, set `require_gateway_shadow: true` and an `automatic_shadow` entry for
+**every member policy** in the source protection configuration. Each entry names
+its Gateway dataset and read/refresh credential environment variables; see
+[shadow configuration](SHADOW_VALIDATION.md). Partial group coverage blocks deletion.
+
+Before deleting any member, the scheduler validates the whole group against the
+source and Gateway, including newer children selected from archived parent keys.
+A mismatch or Gateway failure holds the group before source deletion. Retry keeps
+the same jobs. Once a member has begun verified deletion, its manifest-bound receipt
+supports further slices and recovery without comparing already deleted source rows.
+Unstarted members require current passing reports. Cached valid evidence can be
+reused; this is not a requirement for continuous Gateway availability after approval.
+Quiescence and immutable archives remain required. Full archive verification still
+runs before every deletion slice; large groups and archives need performance testing.
+
+
 ### MongoDB connector
 
 MongoDB 8.0 replica-set support is available as the separate

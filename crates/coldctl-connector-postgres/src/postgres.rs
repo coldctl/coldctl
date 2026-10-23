@@ -244,7 +244,14 @@ impl PostgresSource {
         for (oid, position) in positions {
             ordered_ids[position] = oid;
         }
-        Ok((Discovery { schemas, tables }, ordered_ids))
+        Ok((
+            Discovery {
+                schemas,
+                tables,
+                relationships: Some(crate::relationships::discover(tx).await?),
+            },
+            ordered_ids,
+        ))
     }
 
     async fn analyze_inner(&self) -> Result<coldctl_core::analysis::Analysis, Error> {

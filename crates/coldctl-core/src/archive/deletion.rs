@@ -18,6 +18,15 @@ pub struct Options {
 }
 
 pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store::Progress, Error> {
+    run_mode(paths, id, options, false).await
+}
+
+pub(crate) async fn run_mode(
+    paths: &StatePaths,
+    id: &str,
+    options: Options,
+    require_empty_children: bool,
+) -> Result<store::Progress, Error> {
     if !options.confirm_delete || !options.confirm_original_source || options.max_batches == Some(0)
     {
         return Err(Error::Archive(
@@ -80,11 +89,26 @@ pub async fn run(paths: &StatePaths, id: &str, options: Options) -> Result<store
             "connector does not support verified deletion; install an updated connector for this engine",
         ));
     }
+    if require_empty_children
+        && !client
+            .hello
+            .features
+            .contains("mysql-empty-children-delete-v1")
+        && !client
+            .hello
+            .features
+            .contains("postgres-empty-children-delete-v1")
+    {
+        return Err(Error::Archive(
+            "connector does not support coordinated child guards",
+        ));
+    }
     client
         .call::<_, ()>(
             Request::DeleteOpen(DeleteSpec {
                 plan: job.plan.clone(),
                 source_identity: journal.source_identity,
+                require_empty_children,
             }),
             30_000,
             false,

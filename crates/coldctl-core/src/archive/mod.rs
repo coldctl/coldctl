@@ -14,3 +14,4 @@ pub mod key;
 pub mod shadow;
 
 pub mod automatic_shadow;
+pub mod group;

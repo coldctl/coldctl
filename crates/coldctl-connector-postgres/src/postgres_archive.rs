@@ -12,21 +12,22 @@ use std::{path::PathBuf, time::Duration};
 use tokio_postgres::{GenericClient, types::ToSql};
 
 pub struct PostgresArchive {
-    session: Session,
+    pub(crate) session: Session,
+    pub(crate) selection: Option<crate::parent_selection::Selection>,
     operation_timeout: Duration,
 }
 
 pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
-fn relation(policy: &Policy) -> String {
+pub(crate) fn relation(policy: &Policy) -> String {
     format!(
         "{}.{}",
         quote_identifier(&policy.config.schema),
         quote_identifier(&policy.config.table)
     )
 }
-fn predicate(plan: &ArchivePlan) -> String {
+pub(crate) fn predicate(plan: &ArchivePlan) -> String {
     let equality = match &plan.policy.config.equals_column {
         Some(column) => format!("{}::text = $2::text", quote_identifier(column)),
         None => "$2::text IS NULL".into(),
@@ -199,6 +200,7 @@ impl PostgresArchive {
             .map_err(|e| postgres_error("configure archive session", e))?;
         Ok(Self {
             session,
+            selection: None,
             operation_timeout: Duration::from_secs(30),
         })
     }
@@ -231,7 +233,7 @@ impl PostgresArchive {
             .await
             .map_err(|e| postgres_error("determine cutoff", e))?
             .get(0);
-        let mut plan=ArchivePlan{destination_config:None,connector_pin:None,safety:None,policy,destination_path,cutoff_utc,primary_key,columns,table_oid,estimated_rows:None,delete:false,warnings:vec!["Export uses per-batch snapshots; archive immutable cold rows. Concurrent changes can alter eligibility or values.".into(),"Numeric/date/timestamp/UUID/JSON columns are stored losslessly as UTF-8 text with PostgreSQL type metadata.".into(),"Rows larger than 64 KiB in JSON text-array form fail rather than being truncated.".into()]};
+        let mut plan=ArchivePlan{parent_selection:vec![],destination_config:None,connector_pin:None,safety:None,policy,destination_path,cutoff_utc,primary_key,columns,table_oid,estimated_rows:None,delete:false,warnings:vec!["Export uses per-batch snapshots; archive immutable cold rows. Concurrent changes can alter eligibility or values.".into(),"Numeric/date/timestamp/UUID/JSON columns are stored losslessly as UTF-8 text with PostgreSQL type metadata.".into(),"Rows larger than 64 KiB in JSON text-array form fail rather than being truncated.".into()]};
         let sql = format!(
             "EXPLAIN (FORMAT JSON) SELECT * FROM {} WHERE {}",
             relation(&plan.policy),
@@ -276,6 +278,7 @@ impl PostgresArchive {
         last: Option<i64>,
         upper: i64,
     ) -> Result<Option<DataBatch>, Error> {
+        let selected_predicate = self.selection_predicate(plan)?;
         let tx = self
             .session
             .client
@@ -307,7 +310,7 @@ impl PostgresArchive {
         let sql = format!(
             "SELECT {key}::bigint,CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END FROM {} WHERE {} AND ($3::bigint IS NULL OR {key}>$3::bigint) AND {key}<=$4::bigint ORDER BY {key} LIMIT $5::bigint",
             relation(&plan.policy),
-            predicate(plan)
+            selected_predicate
         );
         let size = i64::from(plan.policy.config.batch_size);
         let params: &[&(dyn ToSql + Sync)] = &[
@@ -349,6 +352,7 @@ impl super::ArchiveSource for PostgresArchive {
         &mut self,
         plan: &ArchivePlan,
     ) -> Result<Option<coldctl_core::archive::key::ArchiveKey>, Error> {
+        self.selection_predicate(plan)?;
         tokio::time::timeout(self.operation_timeout, async {
             let tx = self
                 .session

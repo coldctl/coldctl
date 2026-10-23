@@ -32,6 +32,58 @@ pub struct ConnectionInfo {
 pub struct Discovery {
     pub schemas: Vec<String>,
     pub tables: Vec<Table>,
+    /// None means this connector has not reported relationship metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationships: Option<Relationships>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Relationships {
+    /// Discovery can be privilege-filtered; never use it to authorize deletion.
+    pub visibility: String,
+    pub foreign_keys: Vec<ForeignKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignKey {
+    pub name: String,
+    pub child_schema: String,
+    pub child_table: String,
+    pub child_columns: Vec<String>,
+    pub parent_schema: String,
+    pub parent_table: String,
+    pub parent_columns: Vec<String>,
+    pub on_delete: String,
+    pub on_update: String,
+}
+
+#[cfg(test)]
+mod relationship_tests {
+    use super::Discovery;
+
+    #[test]
+    fn older_discovery_does_not_claim_relationship_coverage() {
+        let old: Discovery = serde_json::from_str(r#"{"schemas":[],"tables":[]}"#).unwrap();
+        assert!(old.relationships.is_none());
+        assert!(
+            serde_json::to_value(old)
+                .unwrap()
+                .get("relationships")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn composite_foreign_key_order_and_visibility_survive_transport() {
+        let value = serde_json::json!({"schemas":["app"],"tables":[],"relationships":{
+            "visibility":"visible_metadata_only","foreign_keys":[{
+                "name":"fk_order","child_schema":"app","child_table":"items",
+                "child_columns":["order_id","tenant_id"],"parent_schema":"app",
+                "parent_table":"orders","parent_columns":["id","tenant_id"],
+                "on_delete":"CASCADE","on_update":"RESTRICT"}]}});
+        let discovery: Discovery = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(discovery).unwrap(), value);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
