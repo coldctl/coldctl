@@ -83,3 +83,36 @@ fn journal_retention_exposes_a_gap_instead_of_claiming_complete_history() {
             .contains("coldctl_monitor_journal_gaps_total 1")
     );
 }
+
+#[test]
+fn unsupported_schemas_do_not_advance_monitor_history() {
+    for schema in [16, 20] {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path())).unwrap();
+        state::initialize(&paths, "test").unwrap();
+        let c = rusqlite::Connection::open(paths.database()).unwrap();
+        c.execute("DELETE FROM schema_migrations WHERE version > ?1", [schema])
+            .unwrap();
+        if schema == 20 {
+            c.execute(
+                "UPDATE schema_migrations SET version=20 WHERE version=19",
+                [],
+            )
+            .unwrap();
+        }
+        let monitor = Monitor::open(
+            &temp.path().join("monitoring.sqlite"),
+            "agent",
+            AlertConfig::default(),
+        )
+        .unwrap();
+        let before = monitor.history().unwrap();
+        assert!(
+            monitoring_agent::sample(&paths, &monitor)
+                .unwrap_err()
+                .to_string()
+                .contains("monitoring supports schemas")
+        );
+        assert_eq!(before, monitor.history().unwrap());
+    }
+}

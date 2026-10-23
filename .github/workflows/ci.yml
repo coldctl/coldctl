@@ -77,8 +77,8 @@ jobs:
       - run: echo "COLDCTL_SIGNED_TEST_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-postgres" >> "$GITHUB_ENV"
       - run: echo "COLDCTL_SIGNED_TEST_MYSQL_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mysql" >> "$GITHUB_ENV"
       - run: echo "COLDCTL_SIGNED_TEST_MONGODB_BINARY=$GITHUB_WORKSPACE/target/debug/coldctl-connector-mongodb" >> "$GITHUB_ENV"
-      # Object-storage integration tests run in the s3 and azure jobs with their own fixtures.
-      - run: cargo test --workspace --exclude coldctl-connector-mysql --exclude coldctl-connector-mongodb --locked -- --ignored --skip s3_ --skip azure_
+      # Object-storage integration tests run in the s3, azure and gcs jobs with their own fixtures.
+      - run: cargo test --workspace --exclude coldctl-connector-mysql --exclude coldctl-connector-mongodb --locked -- --ignored --skip s3_ --skip azure_ --skip gcs_
   mysql:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -180,6 +180,34 @@ jobs:
       - run: cargo test --locked -p coldctl-core --lib azure_ -- --ignored
       - if: always()
         run: docker compose -f scripts/compose.azure.yml down
+  gcs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      COLDCTL_TEST_GCS_ENDPOINT: http://127.0.0.1:14445
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: docker compose -f scripts/compose.gcs.yml up -d
+      - shell: bash
+        run: |
+          curl --fail --retry 30 --retry-connrefused --retry-delay 1 --max-time 5 \
+            -H 'Content-Type: application/json' -d '{"name":"coldctl-test"}' \
+            http://127.0.0.1:14443/storage/v1/b
+          python3 scripts/gcs-emulator-proxy.py > /tmp/coldctl-gcs-proxy.log 2>&1 &
+          echo $! > /tmp/coldctl-gcs-proxy.pid
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 --max-time 5 \
+            http://127.0.0.1:14445/__fixture_stats
+      - run: cargo test --locked -p coldctl-core --lib gcs_ -- --ignored
+      - run: python3 -c "import json,urllib.request; s=json.load(urllib.request.urlopen('http://127.0.0.1:14445/__fixture_stats',timeout=5)); assert s['precondition_failures'] > 0, s"
+      - if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/coldctl-gcs-proxy.pid ]; then kill "$(cat /tmp/coldctl-gcs-proxy.pid)" || true; fi
+          docker compose -f scripts/compose.gcs.yml down
   recurring-s3:
     runs-on: ubuntu-24.04
     timeout-minutes: 45

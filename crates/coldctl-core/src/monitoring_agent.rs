@@ -13,8 +13,8 @@ pub fn sample(paths: &StatePaths, monitor: &Monitor) -> Result<String> {
         r.get(0)
     })?;
     ensure!(
-        schema == 17,
-        "monitoring requires schema 17; stop workers and run coldctl init"
+        (17..=19).contains(&schema),
+        "monitoring supports schemas 17 through 19; use a matching agent and run coldctl init after stopping workers"
     );
     let journal_end: i64 = tx.query_row(
         "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='operational_events'),0)",
