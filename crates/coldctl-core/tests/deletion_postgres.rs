@@ -512,8 +512,10 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
     .await
     .unwrap();
     let check = async {
-        // Wait until the real connector holds its schema guard and waits on our row.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Include archive verification and connector startup (which hashes the
+        // debug executable) in this budget. Those can exceed 10s on CI before
+        // the connector ever requests a database lock.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let held:bool=client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.relation=$1::text::regclass AND l.mode='ShareUpdateExclusiveLock' AND l.granted AND a.application_name='coldctl-delete' AND a.wait_event_type='Lock')", &[&format!("{schema}.events")]).await.unwrap().get(0);
             if held {
@@ -541,7 +543,16 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
         }
         tx.commit().await.unwrap();
     };
-    let (deleted, ()) = tokio::join!(deletion::run(&paths, &job.id, options(None)), check);
+    let deleted = deletion::run(&paths, &job.id, options(None));
+    tokio::pin!(deleted);
+    tokio::select! {
+        biased;
+        () = check => {}
+        result = &mut deleted => {
+            panic!("deletion finished before the concurrency checks completed: {result:?}");
+        }
+    }
+    let deleted = deleted.await;
     assert!(
         deleted.is_err(),
         "concurrent changed row must roll back the batch"
