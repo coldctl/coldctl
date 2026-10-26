@@ -8,6 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+base64 = "0.22"
+ring = "0.17"
 anyhow = "1"
 coldctl-connector-protocol.workspace = true
 directories = "6"
@@ -40,8 +42,6 @@ object_store = { version = "0.14.2", default-features = false, features = ["aws"
 [dev-dependencies]
 http = "1"
 http-body-util = "0.1"
-base64 = "0.22"
-ring = "0.17"
 olpc-cjson = "0.1"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 native-tls = "0.2"

@@ -420,6 +420,7 @@ pub(crate) fn manifest_file(
         job.rows_processed
     )
     .map_err(|_| Error::Archive("cannot finish manifest"))?;
+    super::manifest_signing::sign(&mut file, &job.started_at)?;
     file.as_file()
         .sync_all()
         .map_err(|_| Error::Archive("cannot sync manifest"))?;

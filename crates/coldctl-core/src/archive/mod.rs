@@ -4,6 +4,7 @@ pub mod controls;
 pub mod deletion;
 pub mod executor;
 pub mod manifest;
+mod manifest_signing;
 pub mod planner;
 pub mod progress;
 pub mod recovery;

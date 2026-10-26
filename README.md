@@ -98,6 +98,16 @@ state backup rather than running an older binary against upgraded state.
 
 ## Documentation
 
+For trusted Archive Gateway discovery, set both `COLDCTL_ARCHIVE_BINDING` and
+`COLDCTL_ARCHIVE_SIGNING_SEED` in the archiving worker's environment. The seed is
+a standard-base64 32-byte Ed25519 secret; enroll its public key and a unique
+storage-namespace binding with the Gateway administrator. Newly completed
+manifests include a signature over their contents and export-start time. Keep
+the same signing configuration during job recovery. With neither variable set,
+legacy unsigned manifests remain unchanged; partial or invalid configuration
+fails manifest publication. Signed manifests are limited to 8 MiB. See the
+Gateway README for enrollment, key rotation, OIDC and grant configuration.
+
 - [Local and customer-owned S3 destinations](SINKS.md)
 - [Long-running archival scheduler](SCHEDULER.md)
 - [Verified source deletion](DELETION.md)
