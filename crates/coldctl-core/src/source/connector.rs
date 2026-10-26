@@ -61,6 +61,11 @@ pub enum Request {
         completed: bool,
     },
     DeleteOpen(DeleteSpec),
+    ValidateLiveV1(ArchivePlan),
+    DeleteOpenLiveV1(DeleteSpec),
+    DeleteBatchLiveV1 {
+        rows: Vec<Vec<Option<String>>>,
+    },
     DeleteBatch {
         rows: Vec<Vec<Option<String>>>,
     },
@@ -81,6 +86,14 @@ pub struct DeleteSpec {
 pub struct DeleteBatchResult {
     pub deleted: u64,
     pub absent: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveDeleteBatchResult {
+    pub deleted: u64,
+    pub absent: u64,
+    pub deferred: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -322,6 +322,7 @@ impl Validate for Batch {
 pub enum Consistency {
     ImmutableRows,
     QuiescentCopy,
+    LiveValues,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

@@ -83,6 +83,14 @@ fn plan_conversion_preserves_bounds_identity_and_rejects_missing_stability() {
     plan.delete = true;
     assert!(postgres_v2_plan(&plan, pin.clone(), Some(1)).is_err());
     plan.delete = false;
+    plan.safety.as_mut().unwrap().source_stability =
+        coldctl_core::archive::planner::SourceStability::LiveValues;
+    let live = postgres_v2_plan(&plan, pin.clone(), None).unwrap();
+    assert_eq!(live.consistency, Consistency::LiveValues);
+    live.validate().unwrap();
+    let round_trip: ScanPlan =
+        serde_json::from_str(&serde_json::to_string(&live).unwrap()).unwrap();
+    assert_eq!(round_trip.consistency, Consistency::LiveValues);
     plan.safety = None;
     assert!(postgres_v2_plan(&plan, pin, None).is_err());
 }

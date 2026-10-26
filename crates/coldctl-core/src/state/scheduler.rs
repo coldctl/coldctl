@@ -104,6 +104,14 @@ pub fn enqueue(
         return Err(Error::Archive("schedule delay must be at most one year"));
     }
     let policy = super::archive::policy_show(paths, policy)?;
+    if matches!(options.source_stability, SourceStability::LiveValues)
+        && super::sources::show(paths, &policy.source)?
+            .connection
+            .engine()
+            != "postgres"
+    {
+        return Err(Error::Archive("live values require PostgreSQL"));
+    }
     let _guard = crate::archive::checkpoint::policy_lock(paths, &policy.id)?;
     let reserved: bool = open(paths, false)?.query_row("SELECT EXISTS(SELECT 1 FROM recurring_archives WHERE policy_id=?1 AND status!='stopped')", [&policy.id], |r| r.get(0)).map_err(sql_error)?;
     if reserved || super::recurring_groups::reserved(paths, &policy.id)? {

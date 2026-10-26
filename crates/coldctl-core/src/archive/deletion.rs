@@ -4,7 +4,9 @@ use crate::{
     error::Error,
     paths::StatePaths,
     source::{
-        connector::{DeleteBatchResult, DeleteSpec, Request, launch_in_state},
+        connector::{
+            DeleteBatchResult, DeleteSpec, LiveDeleteBatchResult, Request, launch_in_state,
+        },
         postgres_restore::read_batch,
     },
     state::{archive as jobs, deletion as store, sources},
@@ -45,6 +47,14 @@ pub(crate) async fn run_mode(
         .connector_pin
         .as_ref()
         .map_or("postgres", |p| p.id.as_str());
+    let live = job.plan.live_values();
+    if live
+        && (engine != "postgres" || require_empty_children || !job.plan.parent_selection.is_empty())
+    {
+        return Err(Error::Archive(
+            "live deletion requires a single PostgreSQL table",
+        ));
+    }
     if !matches!(engine, "postgres" | "mysql" | "mongodb") {
         return Err(Error::Archive(
             "archive engine does not support verified source deletion",
@@ -58,10 +68,19 @@ pub(crate) async fn run_mode(
         .ok_or(Error::Archive("missing archive manifest"))?;
     crate::protection::authorize_delete(paths, &job, &manifest.sha256)?;
     crate::protection::admit(paths, &job.plan.policy.source)?;
-    let mut progress = store::start(paths, id, &manifest.sha256)?;
+    let mut progress = if live {
+        store::start_mode(paths, id, &manifest.sha256, true)?
+    } else {
+        store::start(paths, id, &manifest.sha256)?
+    };
     if progress.batches > job.objects_created
         || progress.rows_processed > job.rows_processed
-        || progress.rows_processed != progress.rows_deleted + progress.rows_absent
+        || Some(progress.rows_processed)
+            != progress
+                .rows_deleted
+                .checked_add(progress.rows_absent)
+                .and_then(|n| n.checked_add(progress.rows_deferred))
+        || progress.rows_absent_uncertain > progress.rows_absent
         || (progress.completed
             && (progress.batches != job.objects_created
                 || progress.rows_processed != job.rows_processed))
@@ -84,6 +103,11 @@ pub(crate) async fn run_mode(
     // recorded source identity and schema are checked by that connector per batch.
     crate::protection::admit(paths, &job.plan.policy.source)?;
     let mut client = launch_in_state(&source.connection, paths, None).await?;
+    if live && !client.hello.features.contains("postgres-live-values-v1") {
+        return Err(Error::Archive(
+            "connector does not support live value-equivalent deletion",
+        ));
+    }
     if !client.hello.features.contains("verified-delete-v1") {
         return Err(Error::Archive(
             "connector does not support verified deletion; install an updated connector for this engine",
@@ -103,13 +127,18 @@ pub(crate) async fn run_mode(
             "connector does not support coordinated child guards",
         ));
     }
+    let spec = DeleteSpec {
+        plan: job.plan.clone(),
+        source_identity: journal.source_identity,
+        require_empty_children,
+    };
     client
         .call::<_, ()>(
-            Request::DeleteOpen(DeleteSpec {
-                plan: job.plan.clone(),
-                source_identity: journal.source_identity,
-                require_empty_children,
-            }),
+            if live {
+                Request::DeleteOpenLiveV1(spec)
+            } else {
+                Request::DeleteOpen(spec)
+            },
             30_000,
             false,
         )
@@ -141,6 +170,32 @@ pub(crate) async fn run_mode(
                 break;
             }
             return Err(error);
+        }
+        if live {
+            let (entry, committed) = checkpoint::entry(paths, id, sequence)?
+                .ok_or(Error::Archive("missing archive batch"))?;
+            if !committed || entry.batch.rows != count as i64 {
+                return Err(Error::Archive("invalid archive batch identity"));
+            }
+            let attempt = store::prepare_batch(
+                paths,
+                id,
+                sequence,
+                &entry.batch.object.sha256,
+                count as i64,
+            )?;
+            let result: LiveDeleteBatchResult = client
+                .call(Request::DeleteBatchLiveV1 { rows }, 35_000, true)
+                .await?;
+            progress = store::apply_batch(
+                paths,
+                id,
+                &attempt,
+                &result,
+                sequence == job.objects_created,
+            )?;
+            invocation += 1;
+            continue;
         }
         let result: DeleteBatchResult = client
             .call(Request::DeleteBatch { rows }, 120_000, true)

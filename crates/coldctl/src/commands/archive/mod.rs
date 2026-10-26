@@ -480,12 +480,14 @@ pub(super) fn print_plan(plan: &ArchivePlan, output: Output) -> Result<(), serde
 pub enum Stability {
     ImmutableRows,
     QuiescentCopy,
+    LiveValues,
 }
 impl From<Stability> for coldctl_core::archive::planner::SourceStability {
     fn from(value: Stability) -> Self {
         match value {
             Stability::ImmutableRows => Self::ImmutableRows,
             Stability::QuiescentCopy => Self::QuiescentCopy,
+            Stability::LiveValues => Self::LiveValues,
         }
     }
 }

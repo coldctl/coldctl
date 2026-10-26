@@ -14,6 +14,15 @@ use std::path::PathBuf;
 pub enum SourceStability {
     ImmutableRows,
     QuiescentCopy,
+    LiveValues,
+}
+
+impl ArchivePlan {
+    pub fn live_values(&self) -> bool {
+        self.safety
+            .as_ref()
+            .is_some_and(|s| matches!(s.source_stability, SourceStability::LiveValues))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,4 +77,24 @@ pub async fn plan(paths: &StatePaths, name: &str) -> Result<ArchivePlan, Error> 
     let mut plan = reader.plan(policy, destination.path).await?;
     plan.destination_config = destination.config;
     Ok(plan)
+}
+
+/// Online capability/privilege check before enrolling a live schedule. It never mutates source rows.
+pub async fn preflight_live(paths: &StatePaths, name: &str) -> Result<(), Error> {
+    crate::state::deletion::require_live_schema(paths)?;
+    let policy = store::policy_show(paths, name)?;
+    let source = sources::show(paths, &policy.source)?;
+    if source.connection.engine() != "postgres" {
+        return Err(Error::Archive("live values require PostgreSQL"));
+    }
+    let destination = destinations::show(paths, &policy.destination)?;
+    let reader = ConnectorArchive::connect_in_state(source.connection, paths, None).await?;
+    let mut plan = reader.plan(policy, destination.path).await?;
+    plan.safety = Some(SafetyContract {
+        source_stability: SourceStability::LiveValues,
+        source_identity: reader.source_identity(plan.table_oid).await?,
+        available_bytes_at_preflight: 0,
+        minimum_free_bytes: 1,
+    });
+    reader.validate_live(&plan).await
 }

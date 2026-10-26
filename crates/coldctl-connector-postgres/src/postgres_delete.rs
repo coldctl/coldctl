@@ -7,13 +7,14 @@ use coldctl_core::{
     error::Error,
     source::{
         config::ResolvedConnection,
-        connector::{DeleteBatchResult, DeleteSpec},
+        connector::{DeleteBatchResult, DeleteSpec, LiveDeleteBatchResult},
     },
 };
 
 pub struct DeleteSession {
     session: Session,
     spec: DeleteSpec,
+    live: bool,
 }
 fn pg(error: tokio_postgres::Error) -> Error {
     postgres_error("delete archived rows", error)
@@ -38,8 +39,27 @@ fn same(kind: &str, expected: &Option<String>, actual: &Option<String>) -> bool 
 
 impl DeleteSession {
     pub async fn open(connection: ResolvedConnection, spec: DeleteSpec) -> Result<Self, Error> {
+        Self::open_mode(connection, spec, false).await
+    }
+
+    pub async fn open_live(
+        connection: ResolvedConnection,
+        spec: DeleteSpec,
+    ) -> Result<Self, Error> {
+        Self::open_mode(connection, spec, true).await
+    }
+
+    async fn open_mode(
+        connection: ResolvedConnection,
+        spec: DeleteSpec,
+        live: bool,
+    ) -> Result<Self, Error> {
         spec.plan.policy.config.validate()?;
-        if spec.plan.safety.is_none() || spec.plan.delete {
+        if spec.plan.safety.is_none()
+            || spec.plan.delete
+            || spec.plan.live_values() != live
+            || (live && (spec.require_empty_children || !spec.plan.parent_selection.is_empty()))
+        {
             return Err(Error::Archive(
                 "deletion requires an original archive safety contract",
             ));
@@ -51,13 +71,51 @@ impl DeleteSession {
             ));
         }
         session.client.batch_execute("SET application_name='coldctl-delete'; SET search_path=pg_catalog; SET TIME ZONE 'UTC'; SET DateStyle='ISO, YMD'; SET extra_float_digits=3;").await.map_err(pg)?;
-        Ok(Self { session, spec })
+        if live {
+            validate_live(&session.client, &spec.plan).await?;
+            session
+                .client
+                .batch_execute("SET idle_in_transaction_session_timeout='10s'")
+                .await
+                .map_err(pg)?;
+        }
+        Ok(Self {
+            session,
+            spec,
+            live,
+        })
     }
 
     pub async fn batch(
         &mut self,
         rows: &[Vec<Option<String>>],
     ) -> Result<DeleteBatchResult, Error> {
+        if self.live {
+            return Err(Error::Archive("legacy operation on live deletion session"));
+        }
+        let result = self.batch_inner(rows).await?;
+        Ok(DeleteBatchResult {
+            deleted: result.deleted,
+            absent: result.absent,
+        })
+    }
+
+    pub async fn batch_live(
+        &mut self,
+        rows: &[Vec<Option<String>>],
+    ) -> Result<LiveDeleteBatchResult, Error> {
+        if !self.live {
+            return Err(Error::Archive("live operation on legacy deletion session"));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.batch_inner(rows))
+            .await
+            .map_err(|_| Error::Connector(coldctl_connector_runtime::Error::Timeout))?
+    }
+
+    async fn batch_inner(
+        &mut self,
+        rows: &[Vec<Option<String>>],
+    ) -> Result<LiveDeleteBatchResult, Error> {
         let plan = &self.spec.plan;
         let key_index = plan
             .columns
@@ -128,7 +186,7 @@ impl DeleteSession {
                 "deletion refuses tables with user triggers, rules, or incoming foreign keys",
             ));
         }
-        let keys: Vec<i64> = expected_by_key.keys().copied().collect();
+        let mut keys: Vec<i64> = expected_by_key.keys().copied().collect();
         if self.spec.require_empty_children {
             crate::relationships::guard_empty(&tx, plan, &keys).await?;
         } else {
@@ -146,18 +204,63 @@ impl DeleteSession {
             .collect::<Vec<_>>()
             .join(",");
         let json = format!("pg_catalog.array_to_json(ARRAY[{values}])::text");
+        let mut deferred = 0;
+        let mut absent = 0;
+        if self.live {
+            validate_live(&tx, plan).await?;
+            let predicate = crate::postgres_archive::predicate(plan);
+            let selected = tx.query(
+                &format!("SELECT {key}::bigint, CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END, ({predicate}) IS TRUE FROM ONLY {relation} WHERE {key}=ANY($3::bigint[]) ORDER BY {key} FOR UPDATE", key=quote(&key)),
+                &[&plan.cutoff_utc, &plan.policy.config.equals_value, &keys],
+            ).await.map_err(pg)?;
+            let mut seen = std::collections::BTreeSet::new();
+            keys.clear();
+            for row in selected {
+                let id: i64 = row.get(0);
+                let expected = expected_by_key.get(&id).ok_or_else(changed)?;
+                if !seen.insert(id) {
+                    return Err(changed());
+                }
+                let encoded: Option<String> = row.get(1);
+                let eligible: bool = row.get(2);
+                let actual: Option<Vec<Option<String>>> = encoded
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|_| changed())?;
+                if eligible
+                    && actual.as_ref().is_some_and(|actual| {
+                        actual.len() == expected.len()
+                            && plan
+                                .columns
+                                .iter()
+                                .zip(expected.iter().zip(actual))
+                                .all(|(c, (a, b))| same(&c.postgres_type, a, b))
+                    })
+                {
+                    keys.push(id);
+                } else {
+                    deferred += 1;
+                }
+            }
+            absent = (expected_by_key.len() - seen.len()) as u64;
+        }
         // DELETE locks only affected rows and RETURNING captures the exact version
         // deleted, including a concurrently committed update. Compare all values
         // before COMMIT; any mismatch rolls back the entire batch. Do not use a
         // separate unlocked SELECT (TOCTOU), or SKIP LOCKED (not evidence of absence).
         // Triggers, rules, incoming FKs and RLS were rejected under the schema guard.
-        let deleted = tx
+        let deleted = if keys.is_empty() {
+            Vec::new()
+        } else {
+            tx
             .query(
                 &format!("DELETE FROM {relation} WHERE {key}=ANY($1::bigint[]) RETURNING {key}::bigint, CASE WHEN pg_catalog.octet_length({json})<=65536 THEN {json} ELSE NULL END", key = quote(&key)),
                 &[&keys],
             )
             .await
-            .map_err(pg)?;
+            .map_err(pg)?
+        };
         let mut present = std::collections::BTreeSet::new();
         for row in deleted {
             let id: i64 = row.get(0);
@@ -176,13 +279,57 @@ impl DeleteSession {
                 return Err(changed());
             }
         }
-        let result = DeleteBatchResult {
+        if self.live && present.len() != keys.len() {
+            return Err(changed());
+        }
+        let result = LiveDeleteBatchResult {
             deleted: present.len() as u64,
-            absent: (keys.len() - present.len()) as u64,
+            absent: if self.live {
+                absent
+            } else {
+                (keys.len() - present.len()) as u64
+            },
+            deferred,
         };
         tx.commit().await.map_err(pg)?;
         Ok(result)
     }
+}
+
+pub(crate) async fn validate_live(
+    client: &impl tokio_postgres::GenericClient,
+    plan: &coldctl_core::archive::planner::ArchivePlan,
+) -> Result<(), Error> {
+    if !plan.live_values() || !plan.parent_selection.is_empty() || plan.delete {
+        return Err(Error::Archive(
+            "live values require a single PostgreSQL table",
+        ));
+    }
+    let (oid, key, columns) = inspect(client, &plan.policy).await?;
+    validate_signature(client, plan).await?;
+    if oid != plan.table_oid || key != plan.primary_key || columns != plan.columns {
+        return Err(Error::Archive("live source schema changed"));
+    }
+    let permitted: bool = client
+        .query_one(
+            "SELECT has_table_privilege($1::oid,'DELETE') AND has_any_column_privilege($1::oid,'UPDATE')",
+            &[&oid],
+        )
+        .await
+        .map_err(pg)?
+        .get(0);
+    if !permitted {
+        return Err(Error::Archive(
+            "live values require DELETE and UPDATE privilege on at least one column",
+        ));
+    }
+    let unsafe_table: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=$1 AND NOT tgisinternal) OR EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=$1) OR EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE confrelid=$1 AND contype='f')", &[&oid]).await.map_err(pg)?.get(0);
+    if unsafe_table {
+        return Err(Error::Archive(
+            "live deletion refuses triggers, rules, or incoming foreign keys",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

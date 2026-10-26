@@ -30,29 +30,34 @@ pub fn collect(paths: &StatePaths) -> Result<Vec<Value>> {
         out.push(v);
     }
     let c = state::database::open_initialized(paths, false)?;
-    let mut stmt = c.prepare(
-        "SELECT job_id,rows_deleted,rows_absent,completed FROM archive_deletions ORDER BY job_id",
-    )?;
-    for row in stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, bool>(3)?,
-        ))
-    })? {
-        let (id, deleted, absent, completed) = row?;
+    let mut stmt = c.prepare("SELECT job_id FROM archive_deletions ORDER BY job_id")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let id = row?;
+        let progress = state::deletion::show(paths, &id)?
+            .ok_or_else(|| anyhow::anyhow!("missing deletion checkpoint"))?;
+        let completed = progress.completed;
         let mut v = item(
             format!("deletion:{id}"),
             "deletion",
             id.clone(),
-            if completed { "completed" } else { "partial" }.into(),
+            if completed && progress.rows_deferred > 0 {
+                "completed_with_deferred"
+            } else if completed {
+                "completed"
+            } else {
+                "partial"
+            }
+            .into(),
         );
         v["jobId"] = json!(id);
-        v["deletedRows"] = json!(deleted);
+        v["deletedRows"] = json!(progress.rows_deleted);
         v["deleteAuthorized"] = json!(true);
-        v["absentRows"] = json!(absent);
+        v["absentRows"] = json!(progress.rows_absent);
         v["completed"] = json!(completed);
+        if progress.deletion_mode == "live_values_v1" {
+            v["deferredRows"] = json!(progress.rows_deferred);
+            v["uncertainAbsentRows"] = json!(progress.rows_absent_uncertain);
+        }
         out.push(v);
     }
     for c in crate::connectors::inventory(paths)? {

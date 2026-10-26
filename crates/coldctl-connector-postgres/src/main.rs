@@ -68,6 +68,27 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::ValidateLiveV1(plan) => {
+                let scan = self.scan.as_ref().ok_or(Error::Archive("scan not open"))?;
+                postgres_delete::validate_live(&scan.session.client, &plan).await?;
+                value(())
+            }
+            Request::DeleteOpenLiveV1(spec) => {
+                if self.scan.is_some() || self.restore.is_some() || self.deletion.is_some() {
+                    return Err(Error::Archive("session already opened"));
+                }
+                self.deletion = Some(
+                    postgres_delete::DeleteSession::open_live(self.connection()?, spec).await?,
+                );
+                value(())
+            }
+            Request::DeleteBatchLiveV1 { rows } => value(
+                self.deletion
+                    .as_mut()
+                    .ok_or(Error::Archive("deletion not open"))?
+                    .batch_live(&rows)
+                    .await?,
+            ),
             Request::ParentSelectionBegin(plan) => {
                 self.scan
                     .as_mut()
@@ -318,6 +339,7 @@ async fn serve() -> runtime::Result<()> {
             .cloned()
             .chain([
                 "verified-delete-v1".into(),
+                "postgres-live-values-v1".into(),
                 "postgres-ca-v1".into(),
                 "postgres-parent-selection-v1".into(),
                 "postgres-empty-children-delete-v1".into(),

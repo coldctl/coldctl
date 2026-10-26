@@ -120,6 +120,14 @@ pub fn postgres_v2_plan(
                 crate::archive::planner::SourceStability::QuiescentCopy => {
                     Consistency::QuiescentCopy
                 }
+                crate::archive::planner::SourceStability::LiveValues => {
+                    if pin.id != "postgres" || !plan.parent_selection.is_empty() {
+                        return Err(ContractError(
+                            "live values require a single PostgreSQL table",
+                        ));
+                    }
+                    Consistency::LiveValues
+                }
             }
         }
         None => {

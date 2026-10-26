@@ -11,6 +11,7 @@ pub(super) fn version(conn: &Connection) -> Result<i64, Error> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error)?;
     match versions.as_slice() {
+        v if v == (1..=20).collect::<Vec<_>>().as_slice() => Ok(20),
         [
             1,
             2,
@@ -256,6 +257,31 @@ pub(super) fn apply(conn: &Connection) -> Result<(), Error> {
             .map_err(sql_error)?;
         conn.execute(
             "INSERT INTO schema_migrations VALUES(19,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            [],
+        )
+        .map_err(sql_error)?;
+    }
+    if version(conn)? == 19 {
+        let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM archive_deletions WHERE rows_processed != rows_deleted+rows_absent OR length(manifest_sha256)!=64)", [], |r|r.get(0)).map_err(sql_error)?;
+        if invalid {
+            return Err(Error::InvalidState(
+                "invalid deletion history; refusing migration".into(),
+            ));
+        }
+        conn.execute_batch(include_str!("../../migrations/0020_live_deletion.sql"))
+            .map_err(sql_error)?;
+        if conn
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(sql_error)?
+            .exists([])
+            .map_err(sql_error)?
+        {
+            return Err(Error::InvalidState(
+                "live deletion migration found invalid foreign keys".into(),
+            ));
+        }
+        conn.execute(
+            "INSERT INTO schema_migrations VALUES(20,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             [],
         )
         .map_err(sql_error)?;

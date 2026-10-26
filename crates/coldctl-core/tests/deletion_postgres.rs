@@ -35,8 +35,172 @@ fn archive_options() -> executor::RunOptions {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable COLDCTL_TEST_POSTGRES_URL and updated PostgreSQL connector"]
+async fn live_values_defer_changes_and_recover_lost_acknowledgement() {
+    let config: tokio_postgres::Config = std::env::var("COLDCTL_TEST_POSTGRES_URL")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (client, connection) = config
+        .connect(postgres_native_tls::MakeTlsConnector::new(
+            native_tls::TlsConnector::new().unwrap(),
+        ))
+        .await
+        .unwrap();
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let schema = format!("live_values_{}", uuid::Uuid::new_v4().simple());
+    client.batch_execute(&format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.events(id bigint PRIMARY KEY,created_at timestamptz,note text); INSERT INTO {schema}.events SELECT n,now()-INTERVAL '500 days','original' FROM generate_series(1,8)n")).await.unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StatePaths::resolve(Some(&temp.path().join("state"))).unwrap();
+    state::initialize(&paths, "test").unwrap();
+    let source = SourceConnection::from_url_env("COLDCTL_TEST_POSTGRES_URL".into()).unwrap();
+    sources::add(&paths, "source", source.clone()).unwrap();
+    destinations::add_local(&paths, "disk", &temp.path().join("archives")).unwrap();
+    jobs::policy_create(
+        &paths,
+        "events",
+        "source",
+        "disk",
+        PolicyConfig {
+            schema: schema.clone(),
+            table: "events".into(),
+            time_column: "created_at".into(),
+            older_than_days: 365,
+            batch_size: 6,
+            equals_column: None,
+            equals_value: None,
+        },
+    )
+    .unwrap();
+    let mut run = archive_options();
+    run.source_stability = SourceStability::LiveValues;
+    let job = executor::run(&paths, "events", run).await.unwrap();
+    assert_eq!(job.rows_processed, 8);
+    let mut reader = connector::launch_in_state(&source, &paths, None)
+        .await
+        .unwrap();
+    let identity: String = reader.call(Request::OpenScan, 30_000, false).await.unwrap();
+    let replay: Option<coldctl_core::archive::batch::DataBatch> = reader
+        .call(
+            Request::ReadBatch {
+                plan: job.plan.clone(),
+                last: Some(6.into()),
+                upper: 8.into(),
+                rows: 6,
+                bytes: 32 * 1024 * 1024,
+            },
+            30_000,
+            false,
+        )
+        .await
+        .unwrap();
+    drop(reader);
+    // A -> B -> A is intentionally equivalent. A changed, ineligible, or oversized
+    // current value must survive; a missing key is counted separately.
+    client.batch_execute(&format!("UPDATE {schema}.events SET note='changed' WHERE id=2; UPDATE {schema}.events SET created_at=now() WHERE id=3; UPDATE {schema}.events SET note=repeat('x',70000) WHERE id=4; DELETE FROM {schema}.events WHERE id=5; UPDATE {schema}.events SET note='temporary' WHERE id=6; UPDATE {schema}.events SET note='original' WHERE id=6;")).await.unwrap();
+    let first = deletion::run(&paths, &job.id, options(Some(1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            first.rows_processed,
+            first.rows_deleted,
+            first.rows_absent,
+            first.rows_deferred,
+            first.rows_absent_uncertain
+        ),
+        (6, 2, 1, 3, 0)
+    );
+    assert!(!first.completed);
+    // Persist the intent, commit the source operation, then lose its acknowledgement.
+    let db = rusqlite::Connection::open(paths.database()).unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata_json FROM archive_objects WHERE job_id=?1 AND sequence=2",
+            [&job.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    let hash = metadata["batch"]["object"]["sha256"].as_str().unwrap();
+    db.execute("INSERT INTO archive_deletion_batches(job_id,sequence,object_sha256,row_count,state,attempts,recovery_uncertain) VALUES(?1,2,?2,2,'pending',1,0)", (&job.id,hash)).unwrap();
+    drop(db);
+    let mut native = connector::launch_in_state(&source, &paths, None)
+        .await
+        .unwrap();
+    native
+        .call::<_, ()>(
+            Request::DeleteOpenLiveV1(DeleteSpec {
+                require_empty_children: false,
+                plan: job.plan.clone(),
+                source_identity: identity,
+            }),
+            30_000,
+            false,
+        )
+        .await
+        .unwrap();
+    let committed: connector::LiveDeleteBatchResult = native
+        .call(
+            Request::DeleteBatchLiveV1 {
+                rows: replay.unwrap().rows,
+            },
+            35_000,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.deleted, 2);
+    drop(native);
+    let done = deletion::run(&paths, &job.id, options(None)).await.unwrap();
+    assert!(done.completed);
+    assert_eq!(
+        (
+            done.rows_processed,
+            done.rows_deleted,
+            done.rows_absent,
+            done.rows_deferred,
+            done.rows_absent_uncertain
+        ),
+        (8, 2, 3, 3, 2)
+    );
+    assert_eq!(
+        deletion::run(&paths, &job.id, options(None))
+            .await
+            .unwrap()
+            .rows_processed,
+        8
+    );
+    let survivors: Vec<i64> = client
+        .query(&format!("SELECT id FROM {schema}.events ORDER BY id"), &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(survivors, vec![2, 3, 4]);
+    client
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+    driver.abort();
+}
+
+#[tokio::test]
 #[ignore = "requires disposable PostgreSQL and COLDCTL_TEST_ROLE_PASSWORD=coldctl_test_role_password"]
 async fn deletion_requires_delete_privilege_but_not_update_or_create() {
+    deletion_privileges(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL and COLDCTL_TEST_ROLE_PASSWORD=coldctl_test_role_password"]
+async fn live_deletion_requires_column_update_privilege() {
+    deletion_privileges(true).await;
+}
+
+async fn deletion_privileges(live: bool) {
     assert_eq!(
         std::env::var("COLDCTL_TEST_ROLE_PASSWORD").unwrap(),
         "coldctl_test_role_password"
@@ -83,9 +247,37 @@ async fn deletion_requires_delete_privilege_but_not_update_or_create() {
         },
     )
     .unwrap();
-    let job = executor::run(&paths, "events", archive_options())
-        .await
-        .unwrap();
+    let mut run = archive_options();
+    if live {
+        run.source_stability = SourceStability::LiveValues;
+        assert!(
+            coldctl_core::archive::planner::preflight_live(&paths, "events")
+                .await
+                .is_err()
+        );
+        client
+            .batch_execute(&format!("GRANT DELETE ON {schema}.events TO {role}"))
+            .await
+            .unwrap();
+        assert!(
+            coldctl_core::archive::planner::preflight_live(&paths, "events")
+                .await
+                .is_err()
+        );
+        client
+            .batch_execute(&format!("GRANT UPDATE(note) ON {schema}.events TO {role}"))
+            .await
+            .unwrap();
+    }
+    let job = executor::run(&paths, "events", run).await.unwrap();
+    if live {
+        client
+            .batch_execute(&format!(
+                "REVOKE UPDATE(note) ON {schema}.events FROM {role}"
+            ))
+            .await
+            .unwrap();
+    }
     assert!(deletion::run(&paths, &job.id, options(None)).await.is_err());
     assert_eq!(
         client
@@ -99,6 +291,12 @@ async fn deletion_requires_delete_privilege_but_not_update_or_create() {
         .batch_execute(&format!("GRANT DELETE ON {schema}.events TO {role}"))
         .await
         .unwrap();
+    if live {
+        client
+            .batch_execute(&format!("GRANT UPDATE(note) ON {schema}.events TO {role}"))
+            .await
+            .unwrap();
+    }
     let done = deletion::run(&paths, &job.id, options(None)).await.unwrap();
     assert!(done.completed);
     assert_eq!(done.rows_deleted, 1);
@@ -455,6 +653,16 @@ async fn bulk_deletion_checks_every_row_and_preserves_survivors() {
 #[tokio::test]
 #[ignore = "requires disposable COLDCTL_TEST_POSTGRES_URL and updated PostgreSQL connector"]
 async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
+    concurrent_deletion(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable COLDCTL_TEST_POSTGRES_URL and updated PostgreSQL connector"]
+async fn live_deletion_allows_writes_defers_concurrent_changes_and_times_out_safely() {
+    concurrent_deletion(true).await;
+}
+
+async fn concurrent_deletion(live: bool) {
     async fn connect() -> tokio_postgres::Client {
         let config: tokio_postgres::Config = std::env::var("COLDCTL_TEST_POSTGRES_URL")
             .unwrap()
@@ -501,9 +709,11 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
         },
     )
     .unwrap();
-    let job = executor::run(&paths, "events", archive_options())
-        .await
-        .unwrap();
+    let mut run = archive_options();
+    if live {
+        run.source_stability = SourceStability::LiveValues;
+    }
+    let mut job = executor::run(&paths, "events", run).await.unwrap();
     let tx = blocker.transaction().await.unwrap();
     tx.execute(
         &format!("UPDATE {schema}.events SET note='concurrent change' WHERE id=500"),
@@ -543,7 +753,8 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
         }
         tx.commit().await.unwrap();
     };
-    let deleted = deletion::run(&paths, &job.id, options(None));
+    let first_job_id = job.id.clone();
+    let deleted = deletion::run(&paths, &first_job_id, options(None));
     tokio::pin!(deleted);
     tokio::select! {
         biased;
@@ -553,17 +764,25 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
         }
     }
     let deleted = deleted.await;
-    assert!(
-        deleted.is_err(),
-        "concurrent changed row must roll back the batch"
-    );
+    if live {
+        let done = deleted.unwrap();
+        assert_eq!(
+            (done.rows_deleted, done.rows_deferred, done.rows_absent),
+            (499, 1, 0)
+        );
+    } else {
+        assert!(
+            deleted.is_err(),
+            "concurrent changed row must roll back the batch"
+        );
+    }
     assert_eq!(
         client
             .query_one(&format!("SELECT count(*) FROM {schema}.events"), &[])
             .await
             .unwrap()
             .get::<_, i64>(0),
-        501
+        if live { 2 } else { 501 }
     );
     assert_eq!(
         client
@@ -583,9 +802,16 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
         .await
         .unwrap();
     // Holding a target row beyond lock_timeout must fail, not skip it as absent.
+    if live {
+        let mut run = archive_options();
+        run.source_stability = SourceStability::LiveValues;
+        run.allow_repeat = true;
+        job = executor::run(&paths, "events", run).await.unwrap();
+        assert_eq!(job.rows_processed, 1); // Full rescan catches the deferred key.
+    }
     let tx = blocker.transaction().await.unwrap();
     tx.query_one(
-        &format!("SELECT id FROM {schema}.events WHERE id=1 FOR UPDATE"),
+        &format!("SELECT id FROM {schema}.events WHERE id=500 FOR UPDATE"),
         &[],
     )
     .await
@@ -598,11 +824,14 @@ async fn deletion_allows_unrelated_writes_and_rolls_back_concurrent_changes() {
             .await
             .unwrap()
             .get::<_, i64>(0),
-        501
+        if live { 2 } else { 501 }
     );
     let done = deletion::run(&paths, &job.id, options(None)).await.unwrap();
     assert!(done.completed);
-    assert_eq!((done.rows_deleted, done.rows_absent), (500, 0));
+    assert_eq!(
+        (done.rows_deleted, done.rows_absent),
+        (if live { 1 } else { 500 }, 0)
+    );
     assert_eq!(
         client
             .query_one(&format!("SELECT count(*) FROM {schema}.events"), &[])

@@ -86,16 +86,16 @@ fn journal_retention_exposes_a_gap_instead_of_claiming_complete_history() {
 
 #[test]
 fn unsupported_schemas_do_not_advance_monitor_history() {
-    for schema in [16, 20] {
+    for schema in [16, 21] {
         let temp = tempfile::tempdir().unwrap();
         let paths = StatePaths::resolve(Some(temp.path())).unwrap();
         state::initialize(&paths, "test").unwrap();
         let c = rusqlite::Connection::open(paths.database()).unwrap();
         c.execute("DELETE FROM schema_migrations WHERE version > ?1", [schema])
             .unwrap();
-        if schema == 20 {
+        if schema == 21 {
             c.execute(
-                "UPDATE schema_migrations SET version=20 WHERE version=19",
+                "UPDATE schema_migrations SET version=21 WHERE version=20",
                 [],
             )
             .unwrap();

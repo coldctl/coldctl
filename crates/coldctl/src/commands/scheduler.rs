@@ -212,6 +212,9 @@ pub async fn run(
                     max_retries,
                     execution,
                 } => {
+                    if matches!(source_stability, super::archive::Stability::LiveValues) {
+                        coldctl_core::archive::planner::preflight_live(paths, &policy).await?;
+                    }
                     let controls = ExecutionControls {
                         max_duration_seconds: Some(300),
                         ..Default::default()
@@ -260,6 +263,9 @@ pub async fn run(
             max_retries,
             execution,
         } => {
+            if matches!(source_stability, super::archive::Stability::LiveValues) {
+                coldctl_core::archive::planner::preflight_live(paths, &policy).await?;
+            }
             let mut controls = if let Some(id) = &job {
                 archive::job_show(paths, id)?.execution
             } else {

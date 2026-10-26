@@ -21,6 +21,24 @@ pub struct PostgresArchive {
     deadline: u32,
 }
 impl PostgresArchive {
+    pub(crate) async fn validate_live(&self, plan: &ArchivePlan) -> Result<(), Error> {
+        if !plan.live_values() {
+            return Ok(());
+        }
+        let mut client = self.client.lock().await;
+        if client.pin.id != "postgres"
+            || !plan.parent_selection.is_empty()
+            || !client.hello.features.contains("postgres-live-values-v1")
+        {
+            return Err(Error::Archive(
+                "live values require a capable PostgreSQL connector and single table",
+            ));
+        }
+        client
+            .call::<_, ()>(Request::ValidateLiveV1(plan.clone()), self.deadline, false)
+            .await?;
+        Ok(())
+    }
     pub(crate) async fn prepare_parents(
         &self,
         paths: &crate::paths::StatePaths,
@@ -193,6 +211,7 @@ impl PostgresArchive {
             .await?)
     }
     pub(crate) async fn validate_resume(&mut self, plan: &ArchivePlan) -> Result<(), Error> {
+        self.validate_live(plan).await?;
         let mut client = self.client.lock().await;
         if plan
             .connector_pin
