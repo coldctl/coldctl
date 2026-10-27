@@ -18,6 +18,47 @@ pub struct Args {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Show measured sizes, deletion attribution and optional billing observations.
+    Outcomes { id: String },
+    /// Reclaim within an active customer window (UTC Unix milliseconds, at most 24h).
+    Reclaim {
+        id: String,
+        #[arg(long, required = true)]
+        confirm_original_source: bool,
+        #[arg(long)]
+        window_start_unix_ms: u64,
+        #[arg(long)]
+        window_end_unix_ms: u64,
+        #[arg(long, default_value_t = 5)]
+        wait_timeout_seconds: u32,
+        /// Bound this attempt (1-290 seconds), also limited by the window end.
+        #[arg(long, default_value_t = 240)]
+        max_duration_seconds: u32,
+    },
+    /// Acknowledge manual inspection/cleanup after an interrupted reclaim; never replays it.
+    ReclaimAcknowledge {
+        id: String,
+        #[arg(long, required = true)]
+        confirm_inspected_source: bool,
+    },
+    /// Record observed invoice totals in minor currency units for two completed periods.
+    RecordBilling {
+        id: String,
+        #[arg(long)]
+        currency: String,
+        #[arg(long)]
+        before_minor_units: u64,
+        #[arg(long)]
+        after_minor_units: u64,
+        #[arg(long)]
+        before_start_unix_ms: u64,
+        #[arg(long)]
+        before_end_unix_ms: u64,
+        #[arg(long)]
+        after_start_unix_ms: u64,
+        #[arg(long)]
+        after_end_unix_ms: u64,
+    },
     /// Archive and verify explicit PostgreSQL/MySQL table policies as a group. Never deletes.
     GroupRun {
         #[arg(long, required=true, num_args=2..=32)]
@@ -203,6 +244,73 @@ pub async fn run(args: Args, paths: &StatePaths) -> Result<(), Box<dyn std::erro
             if report.status != "passed" {
                 return Err("shadow validation did not pass; source data was not deleted".into());
             }
+        }
+        Command::Outcomes { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&coldctl_core::archive::outcomes::report(paths, &id)?)?
+        ),
+        Command::Reclaim {
+            id,
+            confirm_original_source,
+            window_start_unix_ms,
+            window_end_unix_ms,
+            wait_timeout_seconds,
+            max_duration_seconds,
+        } => {
+            if !confirm_original_source {
+                return Err("original source confirmation required".into());
+            }
+            let signals = crate::execution::Signals::install()?;
+            let r = tokio::select! { result=coldctl_core::archive::outcomes::reclaim(
+                paths,
+                &id,
+                coldctl_core::archive::outcomes::ReclaimOptions {
+                    window_start_unix_ms,
+                    window_end_unix_ms,
+                    wait_timeout_seconds,
+                    max_duration_seconds,
+                },
+            )
+            => result?,
+            _=async { while !signals.shutdown.requested() {tokio::time::sleep(std::time::Duration::from_millis(100)).await;} } => return Err("reclamation interrupted; inspect the source and durable outcome before retrying".into()),
+            };
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            if !matches!(r.status.as_str(), "completed" | "completed_reusable_only") {
+                return Err("reclamation did not complete; inspect the durable outcome".into());
+            }
+        }
+        Command::ReclaimAcknowledge {
+            id,
+            confirm_inspected_source,
+        } => {
+            if !confirm_inspected_source {
+                return Err("source inspection confirmation required".into());
+            }
+            coldctl_core::archive::outcomes::acknowledge(paths, &id)?;
+        }
+        Command::RecordBilling {
+            id,
+            currency,
+            before_minor_units,
+            after_minor_units,
+            before_start_unix_ms,
+            before_end_unix_ms,
+            after_start_unix_ms,
+            after_end_unix_ms,
+        } => {
+            coldctl_core::archive::outcomes::billing(
+                paths,
+                &id,
+                coldctl_core::archive::outcomes::Billing {
+                    currency,
+                    before_minor_units,
+                    after_minor_units,
+                    before_start_unix_ms,
+                    before_end_unix_ms,
+                    after_start_unix_ms,
+                    after_end_unix_ms,
+                },
+            )?;
         }
         Command::ShadowReports { id } => println!(
             "{}",

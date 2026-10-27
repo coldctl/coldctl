@@ -1,3 +1,4 @@
+mod outcomes;
 mod parent_selection;
 mod postgres;
 mod postgres_archive;
@@ -68,6 +69,12 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
+            Request::MeasurePostgres(spec) => {
+                value(outcomes::measure(self.connection()?, spec).await?)
+            }
+            Request::ReclaimPostgres { spec, options } => {
+                value(outcomes::reclaim(self.connection()?, spec, options).await?)
+            }
             Request::ValidateLiveV1(plan) => {
                 let scan = self.scan.as_ref().ok_or(Error::Archive("scan not open"))?;
                 postgres_delete::validate_live(&scan.session.client, &plan).await?;
@@ -340,6 +347,7 @@ async fn serve() -> runtime::Result<()> {
             .chain([
                 "verified-delete-v1".into(),
                 "postgres-live-values-v1".into(),
+                "postgres-outcomes-v1".into(),
                 "postgres-ca-v1".into(),
                 "postgres-parent-selection-v1".into(),
                 "postgres-empty-children-delete-v1".into(),

@@ -61,6 +61,11 @@ pub enum Request {
         completed: bool,
     },
     DeleteOpen(DeleteSpec),
+    MeasurePostgres(DeleteSpec),
+    ReclaimPostgres {
+        spec: DeleteSpec,
+        options: crate::archive::outcomes::ReclaimOptions,
+    },
     ValidateLiveV1(ArchivePlan),
     DeleteOpenLiveV1(DeleteSpec),
     DeleteBatchLiveV1 {

@@ -135,14 +135,16 @@ pub(crate) async fn run_mode(
     client
         .call::<_, ()>(
             if live {
-                Request::DeleteOpenLiveV1(spec)
+                Request::DeleteOpenLiveV1(spec.clone())
             } else {
-                Request::DeleteOpen(spec)
+                Request::DeleteOpen(spec.clone())
             },
             30_000,
             false,
         )
         .await?;
+    // Persist the first baseline before any source mutation. Resumes never backfill it.
+    super::outcomes::capture(paths, id, &mut client, &spec, true, progress.batches == 0).await?;
     let mut invocation = 0;
     while progress.batches < job.objects_created {
         if options.shutdown.requested() || options.max_batches.is_some_and(|n| invocation >= n) {
@@ -217,6 +219,9 @@ pub(crate) async fn run_mode(
             sequence == job.objects_created,
         )?;
         invocation += 1;
+    }
+    if progress.completed {
+        super::outcomes::capture(paths, id, &mut client, &spec, false, false).await?;
     }
     Ok(progress)
 }

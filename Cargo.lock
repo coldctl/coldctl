@@ -601,13 +601,16 @@ dependencies = [
  "coldctl-connector-protocol",
  "coldctl-connector-runtime",
  "coldctl-core",
+ "fs2",
  "native-tls",
  "postgres-native-tls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]

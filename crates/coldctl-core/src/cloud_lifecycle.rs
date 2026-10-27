@@ -60,6 +60,39 @@ pub fn collect(paths: &StatePaths) -> Result<Vec<Value>> {
         }
         out.push(v);
     }
+    let path = paths.data_dir.join("outcomes.sqlite");
+    if path.exists() {
+        crate::fs_security::check_sqlite(&path)?;
+        let c = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut stmt = c.prepare("SELECT job_id,body FROM outcomes ORDER BY job_id")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, body) = row?;
+            let e: crate::archive::outcomes::Evidence = serde_json::from_str(&body)?;
+            let mut v = item(
+                format!("outcome:{id}"),
+                "outcome",
+                id.clone(),
+                e.reclaim_state.clone().unwrap_or_else(|| "measured".into()),
+            );
+            v["jobId"] = json!(id);
+            // Explicit projection: never upload source configuration, paths or raw errors.
+            let snap = |s: Option<&crate::archive::outcomes::Snapshot>| {
+                s.map(|s|json!({"observedAtUnixMs":s.observed_at_unix_ms,"tableBytes":s.table_bytes,"indexBytes":s.index_bytes,"heapFreeBytes":s.heap_free_bytes,"physicalAllocatedBytes":s.physical_allocated_bytes}))
+            };
+            v["outcomes"] = json!({
+                "beforeDeletion":snap(e.before_deletion.as_ref()),"afterDeletion":snap(e.after_deletion.as_ref()),
+                "reclaimBefore":snap(e.reclaim.as_ref().map(|r|&r.before)),"reclaimAfter":snap(e.reclaim.as_ref().and_then(|r|r.after.as_ref())),
+                "reclaimMethod":e.reclaim.as_ref().map(|r|&r.method),
+                "requiredFreeBytes":e.reclaim.as_ref().and_then(|r|r.required_free_bytes),
+                "minimumFreeBytes":e.reclaim.as_ref().and_then(|r|r.minimum_free_bytes),
+                "billing":e.billing.map(|b|json!({"currency":b.currency,"beforeMinorUnits":b.before_minor_units,"afterMinorUnits":b.after_minor_units,"beforeStartUnixMs":b.before_start_unix_ms,"beforeEndUnixMs":b.before_end_unix_ms,"afterStartUnixMs":b.after_start_unix_ms,"afterEndUnixMs":b.after_end_unix_ms}))
+            });
+            out.push(v);
+        }
+    }
     for c in crate::connectors::inventory(paths)? {
         let pin = c.package.pin();
         let mut v = item(

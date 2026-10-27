@@ -114,6 +114,12 @@ async fn live_values_defer_changes_and_recover_lost_acknowledgement() {
         (6, 2, 1, 3, 0)
     );
     assert!(!first.completed);
+    let baseline = coldctl_core::archive::outcomes::evidence(&paths, &job.id)
+        .unwrap()
+        .before_deletion
+        .unwrap();
+    assert!(baseline.table_bytes > 0);
+
     // Persist the intent, commit the source operation, then lose its acknowledgement.
     let db = rusqlite::Connection::open(paths.database()).unwrap();
     let metadata: String = db
@@ -142,6 +148,18 @@ async fn live_values_defer_changes_and_recover_lost_acknowledgement() {
         )
         .await
         .unwrap();
+    let lock_held: bool = client
+        .query_one(
+            "SELECT pg_try_advisory_lock(1129270340,$1)",
+            &[&(job.plan.table_oid as i32)],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !lock_held,
+        "deletion must exclude concurrent coldctl maintenance"
+    );
     let committed: connector::LiveDeleteBatchResult = native
         .call(
             Request::DeleteBatchLiveV1 {
@@ -181,6 +199,50 @@ async fn live_values_defer_changes_and_recover_lost_acknowledgement() {
         .map(|r| r.get(0))
         .collect();
     assert_eq!(survivors, vec![2, 3, 4]);
+    let evidence = coldctl_core::archive::outcomes::evidence(&paths, &job.id).unwrap();
+    assert_eq!(
+        evidence.before_deletion.unwrap().observed_at_unix_ms,
+        baseline.observed_at_unix_ms,
+        "resume must preserve the first baseline"
+    );
+    assert!(evidence.after_deletion.is_some());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let reclaimed = coldctl_core::archive::outcomes::reclaim(
+        &paths,
+        &job.id,
+        coldctl_core::archive::outcomes::ReclaimOptions {
+            window_start_unix_ms: now - 1000,
+            window_end_unix_ms: now + 60000,
+            wait_timeout_seconds: 1,
+            max_duration_seconds: 30,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reclaimed.method, "vacuum",
+        "this test fixture must not install pg_repack"
+    );
+    assert_eq!(reclaimed.status, "completed_reusable_only");
+    assert!(reclaimed.before.physical_allocated_bytes.is_none());
+    assert_eq!(reclaimed.before.filenode, reclaimed.after.unwrap().filenode);
+    let metadata = coldctl_core::cloud_lifecycle::collect(&paths).unwrap();
+    let outcome = metadata.iter().find(|v| v["kind"] == "outcome").unwrap();
+    assert!(
+        outcome["outcomes"]["beforeDeletion"]["tableBytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        outcome["outcomes"]["beforeDeletion"]
+            .get("filenode")
+            .is_none()
+    );
+
     client
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await

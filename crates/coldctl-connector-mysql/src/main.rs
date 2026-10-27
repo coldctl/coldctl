@@ -79,7 +79,9 @@ impl Server {
     }
     async fn dispatch(&mut self, request: Request) -> Result<serde_json::Value, Error> {
         match request {
-            Request::ValidateLiveV1(_)
+            Request::MeasurePostgres(_)
+            | Request::ReclaimPostgres { .. }
+            | Request::ValidateLiveV1(_)
             | Request::DeleteOpenLiveV1(_)
             | Request::DeleteBatchLiveV1 { .. } => {
                 Err(Error::Archive("live values require PostgreSQL"))

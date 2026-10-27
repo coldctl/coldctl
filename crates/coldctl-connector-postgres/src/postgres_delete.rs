@@ -65,6 +65,7 @@ impl DeleteSession {
             ));
         }
         let session = PostgresSource::new(connection).connect_restore().await?;
+        crate::outcomes::lock(&session.client, spec.plan.table_oid).await?;
         if session.identity != spec.source_identity {
             return Err(Error::Archive(
                 "source endpoint or user changed; refusing deletion",
