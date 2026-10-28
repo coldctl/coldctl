@@ -1,0 +1,8 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!deploy/
+!deploy/docker/
+!deploy/docker/entrypoint.sh

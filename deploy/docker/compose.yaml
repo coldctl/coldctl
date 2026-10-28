@@ -1,0 +1,35 @@
+name: coldctl-agent
+services:
+  agent:
+    image: ${COLDCTL_AGENT_IMAGE:?Set an immutable image digest or a local build tag}
+    platform: linux/amd64
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 2m
+    cpus: 2
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=268435456,mode=1777,noexec,nosuid,nodev
+    volumes:
+      - type: bind
+        source: ${COLDCTL_STATE_DIR:?Set the agent state directory}
+        target: /var/lib/coldctl
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${COLDCTL_ARCHIVE_DIR:?Set the archive directory}
+        target: /archives
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${COLDCTL_SECRET_DIR:?Set the agent secret directory}
+        target: /run/secrets
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

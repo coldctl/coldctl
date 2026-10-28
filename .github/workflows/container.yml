@@ -1,0 +1,73 @@
+name: Docker qualification and publication
+on:
+  pull_request:
+    paths: [Dockerfile, .dockerignore, 'deploy/docker/**', scripts/test_docker.py, .github/workflows/container.yml]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the qualified image and signed provenance to GHCR (main only)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: docker build --platform linux/amd64 -t coldctl-agent:test .
+      - run: python3 scripts/test_docker.py coldctl-agent:test
+  container:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ${{ inputs.publish && 'release' || 'container-qualification' }}
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Restrict publication
+        if: inputs.publish
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: test "$SOURCE_REF" = refs/heads/main
+      - name: Build
+        run: docker build --platform linux/amd64 --label org.opencontainers.image.source=https://github.com/coldctl/coldctl --label org.opencontainers.image.revision="$GITHUB_SHA" -t coldctl-agent:test .
+      - name: Require successful main CI before publication
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: test "$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push --status success --json headSha --jq length)" -gt 0
+      - name: Lifecycle acceptance
+        run: python3 scripts/test_docker.py coldctl-agent:test
+      - name: Publish tested image
+        if: inputs.publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="ghcr.io/coldctl/coldctl:sha-$GITHUB_SHA"
+          docker tag coldctl-agent:test "$image"
+          docker push "$image"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ghcr.io/coldctl/coldctl@$digest" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+        if: inputs.publish
+        with:
+          subject-name: ghcr.io/coldctl/coldctl
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

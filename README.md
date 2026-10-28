@@ -39,6 +39,9 @@ privilege revokes are accepted; target-database or ambiguous revokes fail closed
 
 ## Get started
 
+For the Linux Docker/Compose deployment path, see [Docker installation, resource
+limits and upgrades](DOCKER.md).
+
 Once a release is published, download a Windows or Linux binary from [GitHub Releases](https://github.com/coldctl/coldctl/releases).
 See [installation and verification](#distribution). Alternatively, build from source
 with Rust and the platform's native build prerequisites:
