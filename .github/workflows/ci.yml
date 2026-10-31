@@ -113,7 +113,8 @@ jobs:
       - run: cargo build --locked -p coldctl-connector-mysql
       - run: cargo test -p coldctl-connector-mysql --locked -- --ignored
   mongodb:
-    runs-on: ubuntu-24.04
+    # MongoDB 8.0 rejects newer kernels (SERVER-121912); 22.04 uses kernel 6.8.
+    runs-on: ubuntu-22.04
     timeout-minutes: 35
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
@@ -215,7 +216,8 @@ jobs:
           if [ -f /tmp/coldctl-gcs-proxy.pid ]; then kill "$(cat /tmp/coldctl-gcs-proxy.pid)" || true; fi
           docker compose -f scripts/compose.gcs.yml down
   recurring-s3:
-    runs-on: ubuntu-24.04
+    # Includes MongoDB: keep its host kernel compatible with SERVER-121912.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
