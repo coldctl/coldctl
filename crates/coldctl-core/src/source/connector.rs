@@ -83,7 +83,7 @@ pub struct DeleteSpec {
     pub plan: ArchivePlan,
     pub source_identity: String,
     /// Coordinator-only opt-in: incoming references must be empty under parent locks.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_empty_children: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -248,5 +248,46 @@ fn connector_variable(engine: &str) -> &'static str {
         "mysql" => "COLDCTL_MYSQL_CONNECTOR",
         "mongodb" => "COLDCTL_MONGODB_CONNECTOR",
         _ => "COLDCTL_POSTGRES_CONNECTOR",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_delete_wire_format_omits_disabled_parent_guard() {
+        // Released connectors reject unknown DeleteSpec fields.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyDeleteSpec {
+            plan: ArchivePlan,
+            source_identity: String,
+        }
+        let legacy = serde_json::json!({
+            "plan": {
+                "policy": {"id":"p", "name":"p", "source":"s", "destination":"d",
+                    "created_at":"", "config": {"schema":"public", "table":"events",
+                    "time_column":"created_at", "older_than_days":90, "batch_size":1}},
+                "destination_path":"archive", "cutoff_utc":"2026-01-01",
+                "primary_key":"id", "table_oid":1, "columns":[], "estimated_rows":null,
+                "delete":false, "warnings":[]
+            },
+            "source_identity":"original"
+        });
+        let mut spec: DeleteSpec = serde_json::from_value(legacy).unwrap();
+        assert!(!spec.require_empty_children);
+        let wire = serde_json::to_value(&spec).unwrap();
+        let old: LegacyDeleteSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(old.source_identity, "original");
+        assert_eq!(old.plan.table_oid, 1);
+        spec.require_empty_children = true;
+        let guarded = serde_json::to_value(&spec).unwrap();
+        assert!(serde_json::from_value::<LegacyDeleteSpec>(guarded.clone()).is_err());
+        assert!(
+            serde_json::from_value::<DeleteSpec>(guarded)
+                .unwrap()
+                .require_empty_children
+        );
     }
 }

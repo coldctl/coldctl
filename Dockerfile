@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target cargo build --release --locked -p coldctl -j 2 && cp target/release/coldctl /coldctl
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,target=/src/target,sharing=locked cargo build --release --locked -p coldctl -j 2 && cp target/release/coldctl /coldctl
 
 FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3t64 && rm -rf /var/lib/apt/lists/* && groupadd -g 10001 coldctl && useradd -u 10001 -g 10001 -M coldctl && mkdir -p /var/lib/coldctl /archives && chown 10001:10001 /var/lib/coldctl /archives

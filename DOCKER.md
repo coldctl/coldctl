@@ -163,6 +163,22 @@ Test restoration on an isolated host before relying on backups.
 
 ## Acceptance scope
 
+Run `python scripts/test_docker_e2e.py --registry PATH_TO_EXTRACTED_REGISTRY
+--gateway-repo PATH_TO_GATEWAY --agent NEW_AGENT_IMAGE --gateway NEW_GATEWAY_IMAGE
+--baseline-agent OLD_AGENT_IMAGE --baseline-gateway OLD_GATEWAY_IMAGE` for the
+cross-service deployment trial. The registry must include `root.json` identical to
+the enrolled `release/root.json`, plus its signed metadata and connector targets.
+The fixture uses the published PostgreSQL connector 0.1.2 and disposable PostgreSQL
+and Keycloak containers. It checks archive resume, trusted retrieval, SSO column
+restrictions, coordinated backup restoration and explicit verified deletion.
+It exercises local archive storage; it is not a cloud-store or production-load trial.
+Every container, network and volume it creates has a unique name and is removed
+afterward. Keep both old image tags available before starting.
+
+Agent and Gateway Docker builds lock their shared Cargo caches. Concurrent builds
+may wait for that lock, avoiding crate-unpacking races without rebuilding completed
+layers.
+
 `scripts/test_docker.py` checks fresh initialization, non-root/read-only operation,
 state persistence, exclusive worker admission, two graceful SIGTERM/restart cycles,
 and malformed secret rejection in disposable Docker volumes. Existing R1a/R8 tests
