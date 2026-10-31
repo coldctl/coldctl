@@ -19,6 +19,16 @@ EXT = '.exe' if os.name == 'nt' else ''
 BIN = ROOT / 'target' / 'debug' / ('coldctl' + EXT)
 
 
+def connect_state(path):
+    conn = sqlite3.connect(path)
+    # Ubuntu 22.04's Python links SQLite 3.37. The production CLI bundles
+    # newer SQLite; this fixture clock is needed by both queue and schedule
+    # monitoring triggers, so install it on every fixture connection.
+    if sqlite3.sqlite_version_info < (3, 38, 0):
+        conn.create_function('unixepoch', 0, lambda: int(time.time()))
+    return conn
+
+
 def run(args, env=None):
     result = subprocess.run([str(a) for a in args], env=env, capture_output=True, text=True, timeout=180)
     if result.returncode:
@@ -55,12 +65,7 @@ def main():
                 return run([BIN, '--data-dir', state, *args], env)
 
             def due():
-                with closing(sqlite3.connect(state / 'state.db')) as conn, conn:
-                    # Ubuntu 22.04's Python links SQLite 3.37. The production CLI
-                    # bundles newer SQLite; supply only the zero-argument clock
-                    # used by monitoring triggers on this fixture connection.
-                    if sqlite3.sqlite_version_info < (3, 38, 0):
-                        conn.create_function('unixepoch', 0, lambda: int(time.time()))
+                with closing(connect_state(state / 'state.db')) as conn, conn:
                     conn.execute("UPDATE archive_queue SET due_at=0 WHERE status='pending'")
 
             def cycles(expected):
@@ -88,20 +93,20 @@ def main():
             assert mongo(f'print({collection}.countDocuments({{}}))') == '1'
             pg(f"INSERT INTO public.{name} VALUES(1,now()-interval '500 days','late low key')")
             mongo(f"{collection}.insertOne({{_id:ObjectId('010101010101010101010101'),created_at:new Date(0),note:'late low key'}})")
-            with closing(sqlite3.connect(state / 'state.db')) as conn, conn:
+            with closing(connect_state(state / 'state.db')) as conn, conn:
                 conn.execute('UPDATE recurring_archives SET next_due=0')
             cycles(2)
             assert pg(f'SELECT count(*) FROM public.{name}') == '1'
             assert mongo(f'print({collection}.countDocuments({{}}))') == '1'
             # An empty cycle must finalize safely and wait rather than busy-loop.
-            with closing(sqlite3.connect(state / 'state.db')) as conn, conn:
+            with closing(connect_state(state / 'state.db')) as conn, conn:
                 conn.execute('UPDATE recurring_archives SET next_due=0')
             schedules = cycles(3)
             queues = json.loads(cli('agent', 'scheduler', 'list'))
             assert len(queues) == 6 and all(q['status'] == 'completed' for q in queues)
             for q in queues:
                 cli('archive', 'verify', q['job_id'])
-            with closing(sqlite3.connect(state / 'state.db')) as conn, conn:
+            with closing(connect_state(state / 'state.db')) as conn, conn:
                 assert conn.execute('SELECT sum(rows_deleted) FROM archive_deletions').fetchone()[0] == 6
                 assert conn.execute('SELECT count(*) FROM archive_deletions WHERE completed=1').fetchone()[0] == 6
             for s in schedules:
