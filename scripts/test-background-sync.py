@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='coldctl-cloud-sync-') as directory:
         for _ in range(250):
             c.execute("INSERT INTO jobs(id,policy_name,plan_json,status,started_at) VALUES(?,'fixture',?,'completed','2026-10-14T00:00:00Z')",(str(uuid.uuid4()),json.dumps(plan)))
         first=c.execute('SELECT id FROM jobs LIMIT 1').fetchone()[0]
-        c.execute("INSERT INTO archive_deletions(job_id,manifest_sha256,rows_deleted,rows_absent,completed) VALUES(?,'fixture-hash',1,1,1)",(first,))
+        c.execute("INSERT INTO archive_deletions(job_id,manifest_sha256,rows_processed,rows_deleted,rows_absent,completed) VALUES(?,'fixture-hash',2,1,1,1)",(first,))
         c.commit()
     preview=subprocess.run(base+['agent','sync','--dry-run'],capture_output=True,text=True,check=True)
     pages=json.loads(preview.stdout)

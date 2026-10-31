@@ -126,8 +126,12 @@ jobs:
       - run: rustup toolchain install 1.88.0 --profile minimal
       - shell: bash
         run: |
-          docker run -d --name coldctl-mongo-ci -p 127.0.0.1:15443:27017 -v "$GITHUB_WORKSPACE/scripts:/fixture:ro" --entrypoint sh mongo:8.0 /fixture/mongodb_test_start.sh
+          docker run -d --init --name coldctl-mongo-ci -p 127.0.0.1:15443:27017 -v "$GITHUB_WORKSPACE/scripts:/fixture:ro" --entrypoint sh mongo:8.0@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142 /fixture/mongodb_test_start.sh
           for attempt in {1..60}; do
+            if [ "$(docker inspect --format '{{.State.Running}}' coldctl-mongo-ci)" != true ]; then
+              docker logs coldctl-mongo-ci
+              exit 1
+            fi
             if docker exec coldctl-mongo-ci mongosh --quiet --eval 'db.runCommand({ping:1})'; then break; fi
             sleep 1
           done
@@ -138,6 +142,8 @@ jobs:
           echo 'COLDCTL_CA_END' >> "$GITHUB_ENV"
       - run: cargo build --locked -p coldctl-connector-mongodb
       - run: cargo test -p coldctl-connector-mongodb --locked -- --ignored
+      - if: failure()
+        run: docker logs coldctl-mongo-ci
       - if: always()
         run: docker rm -f -v coldctl-mongo-ci
   s3:
