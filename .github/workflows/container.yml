@@ -65,7 +65,7 @@ jobs:
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ghcr.io/coldctl/coldctl@$digest" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
         if: inputs.publish
         with:
           subject-name: ghcr.io/coldctl/coldctl
