@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,11 @@ def main():
 
             def due():
                 with closing(sqlite3.connect(state / 'state.db')) as conn, conn:
+                    # Ubuntu 22.04's Python links SQLite 3.37. The production CLI
+                    # bundles newer SQLite; supply only the zero-argument clock
+                    # used by monitoring triggers on this fixture connection.
+                    if sqlite3.sqlite_version_info < (3, 38, 0):
+                        conn.create_function('unixepoch', 0, lambda: int(time.time()))
                     conn.execute("UPDATE archive_queue SET due_at=0 WHERE status='pending'")
 
             def cycles(expected):
